@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, FormEvent } from 'react';
+import brandLogo from './assets/prada-sound-logo.png';
 
 type Session = { lobby_id: string; role: 'Main' | 'Member'; host_token?: string };
 type YandexTrack = { id: string; title: string; artist: string };
@@ -186,9 +187,12 @@ const STYLES = `
   @media(max-width:850px){.dashboard,.landing{grid-template-columns:minmax(0,1fr)}.maincol,.sidecol,.card{min-width:0}.landing{min-height:0}.roomhead{display:block}.roomhead .actions{margin-top:16px}.hero{grid-template-columns:minmax(0,1fr) auto}.art{width:145px}}
   @media(max-width:550px){.shell{width:min(100% - 24px,1160px);padding-top:18px}.cardpad,.entry{padding:20px}.topbar{margin-bottom:26px}.hero{grid-template-columns:1fr}.miniPlayer{width:100%;max-width:320px}.art{width:130px;position:absolute;right:-20px;top:-30px;opacity:.35}.heroText{position:relative}.share{align-items:flex-start}.qr{width:124px;height:124px}.addform{display:grid}.button{padding:11px 14px}.deck{padding:18px}.deck-head{grid-template-columns:54px minmax(0,1fr);gap:12px}.deck-art{width:54px;height:54px;border-radius:12px}.deck-onair{grid-column:2;justify-self:start;margin-top:-5px}.deck-track h3{font-size:16px}.deck-timeline{margin:18px 0}.deck-next-label{display:none}.deck-controls{gap:10px}.deck-volume{gap:6px}.deck-volume-range{width:64px}}
   /* Dark film grain and a single playback stage. */
-  .app{background:#191a1c}
-  .app:before{z-index:0;inset:0;opacity:1;background:radial-gradient(ellipse at 80% 8%,#38291f55,transparent 55%),radial-gradient(ellipse at 10% 85%,#1f2a3155,transparent 55%);animation:none}
-  .app:after{content:"";position:fixed;inset:-30px;z-index:0;pointer-events:none;opacity:.85;mix-blend-mode:multiply;background-size:234px 234px;background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3CfeComponentTransfer%3E%3CfeFuncR type='linear' slope='2.2' intercept='-.6'/%3E%3CfeFuncG type='linear' slope='2.2' intercept='-.6'/%3E%3CfeFuncB type='linear' slope='2.2' intercept='-.6'/%3E%3C/feComponentTransfer%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");animation:filmGrain .35s steps(1,end) infinite;will-change:transform}
+  html,body,#root{min-height:100%;background:#191a1c;overscroll-behavior-y:none}
+  .app{background:#191a1c;min-height:100dvh}
+  .app:before,.app:after{display:none}
+  .backdrop{position:fixed;inset:0;z-index:0;pointer-events:none;overflow:hidden;isolation:isolate;background:#191a1c}
+  .backdrop:before{content:"";position:absolute;inset:0;background:radial-gradient(ellipse at 80% 8%,#38291f55,transparent 55%),radial-gradient(ellipse at 10% 85%,#1f2a3155,transparent 55%)}
+  .backdrop:after{content:"";position:absolute;inset:-30px;opacity:.85;mix-blend-mode:multiply;background-size:234px 234px;background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3CfeComponentTransfer%3E%3CfeFuncR type='linear' slope='2.2' intercept='-.6'/%3E%3CfeFuncG type='linear' slope='2.2' intercept='-.6'/%3E%3CfeFuncB type='linear' slope='2.2' intercept='-.6'/%3E%3C/feComponentTransfer%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");animation:filmGrain .35s steps(1,end) infinite;will-change:transform}
   @keyframes filmGrain{0%{transform:translate(0,0)}10%{transform:translate(-13px,9px)}20%{transform:translate(8px,-16px)}30%{transform:translate(-18px,-8px)}40%{transform:translate(15px,12px)}50%{transform:translate(-7px,-19px)}60%{transform:translate(19px,-5px)}70%{transform:translate(-16px,17px)}80%{transform:translate(6px,-11px)}90%{transform:translate(13px,19px)}}
   .shell{position:relative;z-index:1;width:min(1440px,calc(100% - 64px));padding-top:22px}.topbar{margin-bottom:24px}
   .landing{min-height:0;padding-top:clamp(24px,4vh,48px)}
@@ -196,8 +200,8 @@ const STYLES = `
   @keyframes headlineEnter{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}@keyframes accentPulse{0%,100%{color:#f9a15b}50%{color:#ffc18a}}
   .copy-toast{position:fixed;z-index:10;top:max(18px,env(safe-area-inset-top));right:24px;max-width:min(380px,calc(100vw - 32px));margin:0;padding:12px 18px;border:1px solid #db996977;border-radius:14px;background:#24201ff2;color:#ffd0ac;box-shadow:0 12px 35px #0008;pointer-events:none;animation:toastFade 3.6s ease both}
   @keyframes toastFade{0%{opacity:0;transform:translateY(-8px)}8%,84%{opacity:1;transform:translateY(0)}100%{opacity:0;transform:translateY(-8px)}}
-  .brandmark{background:radial-gradient(circle at 30% 16%,#4269b4,#132547 63%,#0a1225);color:#dce8ff;border:1px solid #87a8db5c;box-shadow:inset 0 1px #dce8ff54,0 8px 26px #0006}
-  .brandmark svg{width:26px;height:26px}
+  .brandmark{width:54px;height:54px;flex:none;overflow:hidden;background:#fff;border:1px solid #ffffff40;box-shadow:0 5px 18px #0005}
+  .brandmark img{display:block;width:100%;height:100%;object-fit:contain}
   .eyebrow{color:#ffac6b}.dot{background:#ffac6b;box-shadow:none}.connected .dot{box-shadow:none}
   .landing h1 em{color:#f9a15b}.muted,.trackmeta small,.deck-stage-copy p,.deck-track p,.deck-onair,.deck-timeline,.deck-volume,.deck-next-label,.roomid,.queue .index{color:#c9c8c6}.pill,.field{color:#e0dfdd}input::placeholder{color:#a8a8a8}.entry .divider{color:#aaa}
   .card{background:linear-gradient(155deg,#242628e8,#171a1de8);border-color:#ffffff1b}
@@ -229,7 +233,8 @@ const STYLES = `
   @media(max-width:1000px){.dashboard{grid-template-columns:minmax(0,1fr) minmax(300px,.8fr)}.deck-stage{grid-template-columns:minmax(0,1fr) 210px}.miniPlayer{min-height:205px}}
   @media(max-width:850px){.dashboard{grid-template-columns:1fr}.shell{width:min(100% - 32px,680px)}.deck-stage{grid-template-columns:minmax(0,1fr) minmax(170px,36%)}.sidecol.music-ready .yandex-card{order:0}}
   @media(max-width:550px){.shell{width:min(100% - 24px,680px);padding-top:16px}.topbar{margin-bottom:18px}.landing{padding-top:12px}.copy-toast{right:16px}.deck{padding:20px}.deck-stage{grid-template-columns:1fr;min-height:0;gap:16px;padding-bottom:20px}.deck-stage-copy{min-height:145px}.deck-stage-copy h2{font-size:clamp(27px,8vw,38px)}.miniPlayer{min-height:0;aspect-ratio:16/9}.share-card{padding:20px}.share-card .share{grid-template-columns:minmax(0,1fr) 96px}.share-card .qr{width:96px;height:96px}.likes{max-height:400px}.brand{font-size:20px}}
-  @media(prefers-reduced-motion:reduce){.app:after,.bars i,.spectrum i,.landing-copy,.headline-accent,.copy-toast{animation:none}.button,.headline-word{transition:none}.headline-word:hover,.headline-word:active{transform:none}}
+  @media(max-width:550px){.brandmark{width:44px;height:44px}.topbar>.pill{display:none}}
+  @media(prefers-reduced-motion:reduce){.backdrop:after,.bars i,.spectrum i,.landing-copy,.headline-accent,.copy-toast{animation:none}.button,.headline-word{transition:none}.headline-word:hover,.headline-word:active{transform:none}}
 `;
 
 export default function App() {
@@ -306,7 +311,8 @@ export default function App() {
   const skipSent = useRef('');
   const ytMount = useRef<HTMLDivElement>(null);
   const ytPlayer = useRef<YtPlayer | null>(null);
-  const preparedAudio = useRef(new Map<string, Promise<string>>());
+  const preparedAudio = useRef(new Map<string, { promise: Promise<string>; expiresAt: number }>());
+  const audioRetryKey = useRef('');
   const retryCount = useRef(0);
   const lastRoom = useRef('');
   const draggingItem = useRef('');
@@ -509,20 +515,16 @@ export default function App() {
   function prepareAudio(item: QueueItem): Promise<string> {
     const key = audioCacheKey(item);
     const cached = preparedAudio.current.get(key);
-    if (cached) return cached;
+    if (cached && cached.expiresAt > Date.now()) return cached.promise;
     if (preparedAudio.current.size >= 8) preparedAudio.current.delete(preparedAudio.current.keys().next().value!);
     const promise = resolveAudio(item, new AbortController().signal).catch((error) => {
-      if (preparedAudio.current.get(key) === promise) preparedAudio.current.delete(key);
+      if (preparedAudio.current.get(key)?.promise === promise) preparedAudio.current.delete(key);
       throw error;
     });
-    preparedAudio.current.set(key, promise);
+    preparedAudio.current.set(key, { promise, expiresAt: Date.now() + 5 * 60 * 1000 });
     return promise;
   }
   useEffect(() => { preparedAudio.current.clear(); }, [session?.lobby_id, session?.host_token]);
-  useEffect(() => {
-    if (session?.role !== 'Main') return;
-    for (const item of queueItems.slice(1, 4)) void prepareAudio(item).catch(() => {});
-  }, [queueItems, session?.role, session?.lobby_id, session?.host_token]);
   useEffect(() => {
     const promotion = promoting.current;
     if (promotion && currentItem?.id === promotion.id && playbackRevision === promotion.revision) {
@@ -609,6 +611,18 @@ export default function App() {
     })();
     return () => controller.abort();
   }, [currentKey, nextItem?.id, activeAudio, session?.role, session?.lobby_id, nextCredential]);
+
+  useEffect(() => {
+    if (session?.role !== 'Main' || !audioUrl || playingKey !== currentKey) return;
+    let active = true;
+    void (async () => {
+      for (const item of queueItems.slice(2, 4)) {
+        if (!active) break;
+        try { await prepareAudio(item); } catch {}
+      }
+    })();
+    return () => { active = false; };
+  }, [queueItems, session?.role, currentKey, audioUrl, playingKey]);
 
   useEffect(() => {
     if (!fallbackId || fallbackId !== currentTrack || session?.role !== 'Main' || !ytMount.current) return;
@@ -931,8 +945,8 @@ export default function App() {
   }, [yandexTracks, yandexSearch]);
   const isYandex = currentTrack?.startsWith('yandex_');
   const nowTitle = currentTrack ? trackTitles[currentTrack] || (isYandex ? 'Трек Яндекс Музыки' : `YouTube · ${currentTrack}`) : 'Музыка начинается здесь';
-  return <main className={`app ${telegramInitData ? 'telegram-app' : ''}`}><style>{STYLES}</style><div className="shell">
-    <header className="topbar"><div className="brand"><span className="brandmark"><svg viewBox="0 0 32 32" fill="none" aria-hidden="true"><path d="M6 23.5c4.7-7.3 9-11.2 20-15M6 16c6.8-3.9 13-5.4 20-4.5M8 27c3.9-4.9 8.3-7.1 16-8" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"/><circle cx="8" cy="27" r="2" fill="currentColor"/></svg></span> PRADA SOUND</div>
+  return <main className={`app ${telegramInitData ? 'telegram-app' : ''}`}><style>{STYLES}</style><div className="backdrop" aria-hidden="true" /><div className="shell">
+    <header className="topbar"><div className="brand"><span className="brandmark"><img src={brandLogo} width="54" height="54" alt="" /></span> PRADA SOUND</div>
       {me ? <span className="profile-chip"><Avatar profile={me} size={32} /><span>{profileLabel(me)}</span></span> :
         <span className="pill"><span className="dot" /> PRIVATE MUSIC ROOM</span>}</header>
     {storageWarning && <p className="notice" role="alert">{storageWarning}</p>}
@@ -1039,7 +1053,13 @@ export default function App() {
               else { fading.current = false; skipTrack(); }
             } }}
             onError={() => { if (slot === activeAudioRef.current && slotKeys.current[slot] === currentKey) {
-              if (currentTrack && !currentTrack.startsWith('yandex_')) setFallbackId(currentTrack);
+              if (currentTrack && !currentTrack.startsWith('yandex_')) {
+                if (currentItem && audioRetryKey.current !== currentKey && (audioPlayers[slot].current?.currentTime || 0) < 1) {
+                  audioRetryKey.current = currentKey;
+                  preparedAudio.current.delete(audioCacheKey(currentItem));
+                  setStreamAttempt((value) => value + 1);
+                } else setFallbackId(currentTrack);
+              }
               else {
                 if (currentItem) preparedAudio.current.delete(audioCacheKey(currentItem));
                 setAudioError('Не удалось воспроизвести трек Яндекс Музыки. Повторите загрузку или пропустите его вручную.');
