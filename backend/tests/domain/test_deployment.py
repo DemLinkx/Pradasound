@@ -5,12 +5,12 @@ from fastapi.testclient import TestClient
 from app.main import app
 
 
-def test_production_does_not_extract_youtube_audio(monkeypatch):
+def test_disabled_audio_does_not_extract_youtube(monkeypatch):
     main = importlib.import_module("app.main")
     monkeypatch.setattr(main.settings, "youtube_audio_enabled", False)
 
     def forbidden_extraction(*args, **kwargs):
-        raise AssertionError("yt-dlp must not run in production")
+        raise AssertionError("yt-dlp must not run when audio is disabled")
 
     monkeypatch.setattr(main, "extract_youtube_audio", forbidden_extraction)
     with TestClient(app) as client:

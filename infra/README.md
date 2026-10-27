@@ -147,8 +147,51 @@ HTTP access log API выключен, чтобы не записывать од�
 В `.env.example` перечислены используемые параметры. Необязательные
 `YOUTUBE_API_KEY` и Telegram-настройки можно оставить пустыми. Яндекс авторизуется
 на сайте по device code; общий пароль или токен Яндекса в `.env` не нужен.
-В production Compose принудительно задаёт `YOUTUBE_AUDIO_ENABLED=false` согласно
-правилам проекта: YouTube использует iframe. Аудиокроссфейд работает для Яндекса.
+По умолчанию Compose задаёт `YOUTUBE_AUDIO_ENABLED=false`: YouTube использует
+iframe. Для экспериментального HTML5-аудио явно включите флаг.
+
+### VPN для YouTube и Telegram
+
+Профиль `vpn` запускает sing-box без TUN, прав администратора и открытых портов.
+Лимит памяти — 96 MiB, целевой Go heap — 64 MiB. Яндекс остаётся на прямом
+маршруте: глобальные HTTP_PROXY/HTTPS_PROXY задавать не нужно.
+
+Сохраните полученную у провайдера VLESS-подписку (текст или base64) в приватный
+файл `.local/blanc/subscription.txt`, затем создайте конфигурацию:
+
+```sh
+mkdir -p .local/blanc
+chmod 700 .local/blanc
+python3 infra/vpn_config.py .local/blanc/subscription.txt .local/blanc/config.json --nodes 14,10,0 --pinned-ports
+```
+
+Индексы узлов зависят от вашей подписки. Проверьте выбранные локации перед
+использованием. В `.env` укажите:
+
+```dotenv
+COMPOSE_PROFILES=vpn
+VPN_UID=1000
+VPN_GID=1000
+YOUTUBE_AUDIO_ENABLED=true
+YOUTUBE_PROXY_URLS=["http://egress:1081","http://egress:1082","http://egress:1083"]
+TELEGRAM_PROXY_URL=http://egress:1080
+```
+
+VPN_UID/VPN_GID должны совпадать с владельцем приватного config.json (`id -u`,
+`id -g` на сервере). Порты 1081–1083 закреплены за выбранными узлами; 1080
+автоматически выбирает доступный узел для Telegram. URL аудиопотока и сам поток
+проходят через один и тот же закреплённый узел; сбой извлечения проверяет резерв.
+
+После `docker compose up -d --wait` настройте бота:
+
+```sh
+docker compose exec -T api python - < infra/configure_telegram.py
+python3 infra/smoke.py https://your-domain.example --audio-enabled
+```
+
+Вебхук не требует отдельного постоянно запущенного процесса бота. Код Яндекса
+подтверждается в браузере пользователя; в Telegram используется `openLink`.
+Подписка и токен бота находятся только в приватных файлах; в Git их добавлять нельзя.
 
 Если хостинг уже предоставляет TLS/reverse proxy (например, Docker-панель),
 можно оставить Caddy в HTTP-режиме `SITE_ADDRESS=:80`, направить внешний proxy на

@@ -7,7 +7,8 @@ type YandexLogin = { login_id: string; verification_url: string; user_code: stri
 type QueueItem = { id: string; track_id: string; owner_id: string; access_revision?: number };
 type Profile = { name: string; username: string | null; photo_url: string | null };
 type TelegramWebApp = { initData: string; ready: () => void; expand: () => void;
-  openTelegramLink?: (url: string) => void; themeParams?: { bg_color?: string } };
+  openTelegramLink?: (url: string) => void; openLink?: (url: string) => void;
+  themeParams?: { bg_color?: string } };
 const telegram = (window as Window & { Telegram?: { WebApp?: TelegramWebApp } }).Telegram?.WebApp;
 const telegramInitData = telegram?.initData || '';
 function Avatar({ profile, size = 38 }: { profile?: Profile | null; size?: number }) {
@@ -1103,7 +1104,8 @@ export default function App() {
           {yandexLogin && <div className="authbox" style={{ marginTop: 16 }}>
             <span className="eyebrow">ПОДТВЕРДИТЕ ВХОД</span><p className="muted small">Откройте Яндекс, введите код и разрешите доступ.</p>
             <div className="row" style={{ flexWrap: 'wrap' }}><code className="code mono">{yandexLogin.user_code}</code><button className="button tiny" onClick={() => void copy(yandexLogin.user_code, 'Код')}>Копировать код</button></div>
-            <a className="button primary linklike" style={{ marginTop: 14 }} href={yandexLogin.verification_url} target="_blank" rel="noopener noreferrer">Открыть Яндекс ↗</a>
+            <a className="button primary linklike" style={{ marginTop: 14 }} href={yandexLogin.verification_url} target="_blank" rel="noopener noreferrer"
+              onClick={(event) => { if (telegramInitData && telegram?.openLink) { event.preventDefault(); telegram.openLink(yandexLogin.verification_url); } }}>Открыть Яндекс ↗</a>
           </div>}
           {loadingLikes && <p className="muted small" role="status">{yandexLogin ? 'Ждём подтверждения Яндекса…' : 'Получаем код входа…'}</p>}
           {yandexError && <p className="notice" role="alert">{yandexError}</p>}

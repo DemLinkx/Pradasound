@@ -43,17 +43,33 @@ app.add_middleware(
 app.include_router(healthcheck_router)
 app.include_router(lobby_router)
 
-YOUTUBE_AUDIO_CACHE: dict[str, tuple[str, float]] = {}
+@dataclass(frozen=True)
+class YouTubeAudio:
+    url: str
+    expires_at: float
+    proxy: str | None
+
+
+YOUTUBE_AUDIO_CACHE: dict[str, YouTubeAudio] = {}
 YOUTUBE_METADATA_CACHE: dict[str, tuple[str, str]] = {}
 YOUTUBE_AUDIO_TICKETS: dict[str, tuple[str, float]] = {}
-YOUTUBE_EXTRACT_LIMIT = asyncio.Semaphore(3)
+YOUTUBE_EXTRACT_LIMIT = asyncio.Semaphore(2)
 YOUTUBE_AUDIO_FAILURES: dict[str, tuple[float, str]] = {}
 YOUTUBE_AUDIO_LOCKS: dict[str, asyncio.Lock] = {}
 
 
-def extract_youtube_audio(video_id: str) -> tuple[str, float, str, str]:
+class QuietYoutubeLog:
+    def debug(self, message: str) -> None:
+        pass
+
+    warning = error = debug
+
+
+def extract_youtube_audio(video_id: str, proxy: str | None = None) -> tuple[str, float, str, str]:
     options: dict[str, Any] = {"format": "bestaudio[ext=m4a]/bestaudio", "quiet": True,
-                               "no_warnings": True, "noplaylist": True, "skip_download": True}
+                               "no_warnings": True, "noplaylist": True, "skip_download": True,
+                               "proxy": proxy or "", "socket_timeout": 8, "retries": 0,
+                               "extractor_retries": 0, "logger": QuietYoutubeLog()}
     if settings.youtube_cookies_file:
         if not settings.youtube_cookies_file.is_file():
             raise ValueError("Файл cookies YouTube не найден")
@@ -73,12 +89,33 @@ def extract_youtube_audio(video_id: str) -> tuple[str, float, str, str]:
     return url, min(expiry - 60, time.time() + 600), title, artist
 
 
-async def youtube_audio_url(video_id: str) -> str:
+async def open_youtube_stream(
+    client: httpx.AsyncClient, source: str, byte_range: str | None = None
+) -> httpx.Response:
+    for _ in range(4):
+        parsed = urlparse(source)
+        if (parsed.scheme != "https" or not parsed.hostname
+                or not parsed.hostname.endswith(".googlevideo.com")):
+            raise HTTPException(status_code=502, detail="Некорректный аудиосервер YouTube")
+        response = await client.send(client.build_request(
+            "GET", source, headers={"Range": byte_range} if byte_range else {}
+        ), stream=True)
+        if response.status_code not in (301, 302, 303, 307, 308):
+            return response
+        location = response.headers.get("location", "")
+        await response.aclose()
+        if not location:
+            raise HTTPException(status_code=502, detail="Некорректный редирект YouTube")
+        source = urljoin(source, location)
+    raise HTTPException(status_code=502, detail="Слишком много редиректов YouTube")
+
+
+async def youtube_audio_url(video_id: str) -> YouTubeAudio:
     if not settings.youtube_audio_enabled:
         raise HTTPException(status_code=503, detail="Используйте встроенный плеер YouTube")
     cached = YOUTUBE_AUDIO_CACHE.get(video_id)
-    if cached and cached[1] > time.time():
-        return cached[0]
+    if cached and cached.expires_at > time.time():
+        return cached
     if len(YOUTUBE_AUDIO_LOCKS) >= 512 and video_id not in YOUTUBE_AUDIO_LOCKS:
         for key, candidate in list(YOUTUBE_AUDIO_LOCKS.items()):
             if not candidate.locked():
@@ -87,37 +124,42 @@ async def youtube_audio_url(video_id: str) -> str:
     lock = YOUTUBE_AUDIO_LOCKS.setdefault(video_id, asyncio.Lock())
     async with lock:
         cached = YOUTUBE_AUDIO_CACHE.get(video_id)
-        if cached and cached[1] > time.time():
-            return cached[0]
+        if cached and cached.expires_at > time.time():
+            return cached
         failed = YOUTUBE_AUDIO_FAILURES.get(video_id)
         if failed and failed[0] > monotonic():
             raise HTTPException(status_code=503, detail=failed[1])
-        try:
-            async with YOUTUBE_EXTRACT_LIMIT:
-                url, expiry, title, artist = await asyncio.wait_for(
-                    run_in_threadpool(extract_youtube_audio, video_id), timeout=25
-                )
-        except DownloadError as error:
-            detail = ("YouTube запросил проверку браузера; пробуем встроенный плеер."
-                      if "not a bot" in str(error).lower() else "Не удалось получить аудио YouTube")
-            YOUTUBE_AUDIO_FAILURES[video_id] = (monotonic() + 90, detail)
-            raise HTTPException(status_code=503, detail=detail) from None
-        except (TimeoutError, ValueError):
-            detail = "Не удалось получить аудио YouTube"
-            YOUTUBE_AUDIO_FAILURES[video_id] = (monotonic() + 60, detail)
-            raise HTTPException(status_code=502, detail=detail) from None
-        if expiry <= time.time():
-            raise HTTPException(status_code=502, detail="YouTube вернул просроченную аудиоссылку")
-        if len(YOUTUBE_AUDIO_CACHE) >= 512:
-            YOUTUBE_AUDIO_CACHE.pop(next(iter(YOUTUBE_AUDIO_CACHE)))
-        YOUTUBE_AUDIO_CACHE[video_id] = (url, expiry)
-        if len(YOUTUBE_METADATA_CACHE) >= 512:
-            YOUTUBE_METADATA_CACHE.pop(next(iter(YOUTUBE_METADATA_CACHE)))
-        YOUTUBE_METADATA_CACHE[video_id] = (title, artist)
-        YOUTUBE_AUDIO_FAILURES.pop(video_id, None)
+        async with YOUTUBE_EXTRACT_LIMIT:
+            for proxy in settings.youtube_proxy_urls or [None]:
+                try:
+                    url, expiry, title, artist = await asyncio.wait_for(
+                        run_in_threadpool(extract_youtube_audio, video_id, proxy), timeout=20
+                    )
+                    if expiry <= time.time():
+                        raise ValueError("Expired audio URL")
+                    async with httpx.AsyncClient(proxy=proxy, trust_env=False, timeout=10) as client:
+                        probe = await open_youtube_stream(client, url, "bytes=0-0")
+                        try:
+                            if probe.status_code not in (200, 206):
+                                raise ValueError("Audio unavailable on this route")
+                        finally:
+                            await probe.aclose()
+                except (DownloadError, TimeoutError, ValueError, httpx.HTTPError, HTTPException):
+                    continue
+                source = YouTubeAudio(url, expiry, proxy)
+                if len(YOUTUBE_AUDIO_CACHE) >= 512:
+                    YOUTUBE_AUDIO_CACHE.pop(next(iter(YOUTUBE_AUDIO_CACHE)))
+                YOUTUBE_AUDIO_CACHE[video_id] = source
+                if len(YOUTUBE_METADATA_CACHE) >= 512:
+                    YOUTUBE_METADATA_CACHE.pop(next(iter(YOUTUBE_METADATA_CACHE)))
+                YOUTUBE_METADATA_CACHE[video_id] = (title, artist)
+                YOUTUBE_AUDIO_FAILURES.pop(video_id, None)
+                return source
+        detail = "Аудио YouTube недоступно на доступных маршрутах; пробуем встроенный плеер."
+        YOUTUBE_AUDIO_FAILURES[video_id] = (monotonic() + 60, detail)
         if len(YOUTUBE_AUDIO_FAILURES) >= 512:
             YOUTUBE_AUDIO_FAILURES.pop(next(iter(YOUTUBE_AUDIO_FAILURES)))
-        return url
+        raise HTTPException(status_code=503, detail=detail)
 
 
 @app.post("/api/youtube/audio/{video_id}")
@@ -150,32 +192,20 @@ async def stream_youtube_audio(ticket: str, request: Request) -> StreamingRespon
     byte_range = request.headers.get("range")
     if byte_range and not re.fullmatch(r"bytes=\d*-\d*", byte_range):
         raise HTTPException(status_code=416, detail="Некорректный диапазон")
-    url = await youtube_audio_url(video_id)
-    client = httpx.AsyncClient(timeout=httpx.Timeout(15, read=60), follow_redirects=False)
-
-    async def open_stream(source: str) -> httpx.Response:
-        for _ in range(4):
-            response = await client.send(client.build_request(
-                "GET", source, headers={"Range": byte_range} if byte_range else {}
-            ), stream=True)
-            if response.status_code not in (301, 302, 303, 307, 308):
-                return response
-            location = response.headers.get("location", "")
-            await response.aclose()
-            source = urljoin(source, location)
-            parsed = urlparse(source)
-            if (parsed.scheme != "https" or not parsed.hostname
-                    or not parsed.hostname.endswith(".googlevideo.com")):
-                raise HTTPException(status_code=502, detail="Некорректный редирект YouTube")
-        raise HTTPException(status_code=502, detail="Слишком много редиректов YouTube")
+    source = await youtube_audio_url(video_id)
+    client = httpx.AsyncClient(proxy=source.proxy, trust_env=False,
+                               timeout=httpx.Timeout(15, read=60), follow_redirects=False)
 
     try:
-        upstream = await open_stream(url)
+        upstream = await open_youtube_stream(client, source.url, byte_range)
         if upstream.status_code == 403:
             await upstream.aclose()
             YOUTUBE_AUDIO_CACHE.pop(video_id, None)
-            url = await youtube_audio_url(video_id)
-            upstream = await open_stream(url)
+            await client.aclose()
+            source = await youtube_audio_url(video_id)
+            client = httpx.AsyncClient(proxy=source.proxy, trust_env=False,
+                                       timeout=httpx.Timeout(15, read=60), follow_redirects=False)
+            upstream = await open_youtube_stream(client, source.url, byte_range)
         if upstream.status_code not in (200, 206):
             await upstream.aclose()
             raise HTTPException(status_code=502, detail="YouTube не отдал аудиопоток")
@@ -213,13 +243,23 @@ async def youtube_metadata(video_id: str) -> dict[str, str]:
     if cached:
         return {"title": cached[0], "artist": cached[1]}
     try:
-        async with httpx.AsyncClient(timeout=5, follow_redirects=False) as client:
-            response = await client.get(
-                "https://www.youtube.com/oembed",
-                params={"url": f"https://www.youtube.com/watch?v={video_id}", "format": "json"},
-            )
-            response.raise_for_status()
-            data = response.json()
+        data = None
+        for proxy in settings.youtube_proxy_urls or [None]:
+            try:
+                async with httpx.AsyncClient(proxy=proxy, trust_env=False, timeout=5,
+                                             follow_redirects=False) as client:
+                    response = await client.get(
+                        "https://www.youtube.com/oembed",
+                        params={"url": f"https://www.youtube.com/watch?v={video_id}", "format": "json"},
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+                break
+            except (httpx.HTTPError, ValueError):
+                continue
+        if not isinstance(data, dict) or not data:
+            raise ValueError("missing metadata")
+        if data:
             title, artist = data.get("title"), data.get("author_name")
             if not isinstance(title, str) or not isinstance(artist, str):
                 raise ValueError("missing metadata")
@@ -230,7 +270,8 @@ async def youtube_metadata(video_id: str) -> dict[str, str]:
     except (httpx.HTTPError, ValueError):
         if settings.youtube_api_key:
             try:
-                async with httpx.AsyncClient(timeout=5) as client:
+                async with httpx.AsyncClient(proxy=next(iter(settings.youtube_proxy_urls), None),
+                                             trust_env=False, timeout=5) as client:
                     response = await client.get("https://www.googleapis.com/youtube/v3/videos",
                                                 params={"part": "snippet", "id": video_id,
                                                         "key": settings.youtube_api_key})

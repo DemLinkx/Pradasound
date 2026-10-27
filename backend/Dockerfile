@@ -12,7 +12,9 @@ ARG REVISION="local"
 LABEL org.opencontainers.image.source=$SOURCE_URL \
       org.opencontainers.image.revision=$REVISION
 ENV PATH="/app/backend/.venv/bin:$PATH" \
-    PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+    PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
+    DENO_DIR=/tmp/deno DENO_NO_UPDATE_CHECK=1
+COPY --from=denoland/deno:bin-2.9.8 /deno /usr/local/bin/deno
 RUN groupadd --gid 10001 prada \
     && useradd --uid 10001 --gid prada --no-create-home --shell /usr/sbin/nologin prada
 WORKDIR /app/backend

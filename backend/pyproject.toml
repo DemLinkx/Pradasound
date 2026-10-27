@@ -14,7 +14,7 @@ dependencies = [
     "websockets>=14,<17",
     "httpx>=0.28,<1",
     "yandex-music[async]==3.0.0",
-    "yt-dlp>=2026.8.19",
+    "yt-dlp[default]>=2026.10.26",
 ]
 
 [dependency-groups]

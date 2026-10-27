@@ -22,7 +22,8 @@ def main() -> None:
         raise SystemExit("TELEGRAM_MINI_APP_URL must be the public HTTPS origin")
     webhook = f"{site}/api/lobby/telegram/webhook"
 
-    with httpx.Client(timeout=20) as client:
+    with httpx.Client(proxy=config.get("TELEGRAM_PROXY_URL") or None,
+                      trust_env=False, timeout=20) as client:
         def call(method: str, payload: dict[str, object] | None = None) -> object:
             try:
                 response = client.post(

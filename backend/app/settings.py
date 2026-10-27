@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     yandex_import_enabled: bool = False
     yandex_playback_enabled: bool = False
     youtube_audio_enabled: bool = True
+    youtube_proxy_urls: list[str] = []
     youtube_cookies_file: Path | None = None
     youtube_api_key: str = ""
     telegram_bot_token: str = ""

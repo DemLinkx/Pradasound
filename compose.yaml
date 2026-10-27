@@ -11,12 +11,13 @@ services:
         REVISION: ${PRADA_IMAGE_TAG:-local}
     environment:
       CORS_ORIGINS: ${CORS_ORIGINS:-["http://localhost"]}
-      # Production uses the visible YouTube iframe; extraction is local-only.
-      YOUTUBE_AUDIO_ENABLED: "false"
+      YOUTUBE_AUDIO_ENABLED: ${YOUTUBE_AUDIO_ENABLED:-false}
+      YOUTUBE_PROXY_URLS: ${YOUTUBE_PROXY_URLS:-[]}
       YOUTUBE_API_KEY: ${YOUTUBE_API_KEY:-}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       TELEGRAM_WEBHOOK_SECRET: ${TELEGRAM_WEBHOOK_SECRET:-}
       TELEGRAM_MINI_APP_URL: ${TELEGRAM_MINI_APP_URL:-}
+      TELEGRAM_PROXY_URL: ${TELEGRAM_PROXY_URL:-}
     restart: unless-stopped
     init: true
     read_only: true
@@ -36,6 +37,27 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+  egress:
+    profiles: [vpn]
+    image: ghcr.io/sagernet/sing-box:v1.14.4
+    command: [run, -c, /etc/sing-box/config.json]
+    user: "${VPN_UID:-1000}:${VPN_GID:-1000}"
+    environment:
+      GOMEMLIMIT: 64MiB
+    volumes:
+      - ./.local/blanc/config.json:/etc/sing-box/config.json:ro
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 96m
+    pids_limit: 64
+    logging:
+      driver: local
+      options:
+        max-size: "5m"
+        max-file: "2"
 
   web:
     image: ${PRADA_IMAGE_PREFIX:-prada-sound}-web:${PRADA_IMAGE_TAG:-local}
