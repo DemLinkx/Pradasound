@@ -18,6 +18,7 @@ services:
       TELEGRAM_WEBHOOK_SECRET: ${TELEGRAM_WEBHOOK_SECRET:-}
       TELEGRAM_MINI_APP_URL: ${TELEGRAM_MINI_APP_URL:-}
       TELEGRAM_PROXY_URL: ${TELEGRAM_PROXY_URL:-}
+      TELEGRAM_POLLING_ENABLED: ${TELEGRAM_POLLING_ENABLED:-false}
     restart: unless-stopped
     init: true
     read_only: true

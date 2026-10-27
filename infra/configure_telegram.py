@@ -47,14 +47,18 @@ def main() -> None:
             {"command": "start", "description": "Открыть Prada Sound"},
             {"command": "help", "description": "Как начать вечеринку"},
         ]})
-        call("setWebhook", {
-            "url": webhook, "secret_token": secret,
-            "allowed_updates": ["message"], "max_connections": 10,
-        })
+        polling = str(config.get("TELEGRAM_POLLING_ENABLED", "")).lower() in ("true", "1", "yes")
+        if polling:
+            call("deleteWebhook", {"drop_pending_updates": False})
+        else:
+            call("setWebhook", {
+                "url": webhook, "secret_token": secret,
+                "allowed_updates": ["message"], "max_connections": 10,
+            })
         info = call("getWebhookInfo")
-        if not isinstance(info, dict) or info.get("url") != webhook:
+        if not isinstance(info, dict) or info.get("url") != ("" if polling else webhook):
             raise SystemExit("Telegram did not confirm the expected webhook URL")
-        print(f"Menu, commands and webhook configured: {webhook}")
+        print("Menu and commands configured; " + ("VPN long polling enabled" if polling else f"webhook: {webhook}"))
 
 
 if __name__ == "__main__":

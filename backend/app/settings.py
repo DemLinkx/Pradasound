@@ -20,3 +20,5 @@ class Settings(BaseSettings):
     telegram_bot_token: str = ""
     telegram_webhook_secret: str = ""
     telegram_mini_app_url: str = ""
+    telegram_proxy_url: str = ""
+    telegram_polling_enabled: bool = False

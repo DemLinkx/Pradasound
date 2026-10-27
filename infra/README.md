@@ -175,6 +175,7 @@ VPN_GID=1000
 YOUTUBE_AUDIO_ENABLED=true
 YOUTUBE_PROXY_URLS=["http://egress:1081","http://egress:1082","http://egress:1083"]
 TELEGRAM_PROXY_URL=http://egress:1080
+TELEGRAM_POLLING_ENABLED=true
 ```
 
 VPN_UID/VPN_GID должны совпадать с владельцем приватного config.json (`id -u`,
@@ -189,7 +190,10 @@ docker compose exec -T api python - < infra/configure_telegram.py
 python3 infra/smoke.py https://your-domain.example --audio-enabled
 ```
 
-Вебхук не требует отдельного постоянно запущенного процесса бота. Код Яндекса
+Если входящие соединения от Telegram недоступны, long polling получает команды
+через VPN в фоновой задаче API. Отдельный процесс бота не нужен. Не включайте
+одновременно несколько API-воркеров. При выключенном polling используется вебхук.
+Код Яндекса
 подтверждается в браузере пользователя; в Telegram используется `openLink`.
 Подписка и токен бота находятся только в приватных файлах; в Git их добавлять нельзя.
 

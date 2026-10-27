@@ -2,6 +2,7 @@ import asyncio
 import re
 import secrets
 import time
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from time import monotonic
 from typing import Any
@@ -26,11 +27,25 @@ from yt_dlp.utils import DownloadError
 from app.api.healthcheck import router as healthcheck_router
 from app.api.lobby import LOBBIES
 from app.api.lobby import router as lobby_router
+from app.api.lobby import telegram_polling_loop
 from app.settings import Settings
 
 settings = Settings()
 
-app = FastAPI(title="Prada Sound API", version="0.1.0")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    task = (asyncio.create_task(telegram_polling_loop())
+            if settings.telegram_polling_enabled and settings.telegram_bot_token else None)
+    try:
+        yield
+    finally:
+        if task:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+
+
+app = FastAPI(title="Prada Sound API", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,

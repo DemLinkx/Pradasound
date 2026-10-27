@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import re
 import secrets
 from dataclasses import dataclass, field
@@ -9,6 +10,7 @@ from time import monotonic, time
 from urllib.parse import parse_qsl, urlparse
 from uuid import uuid4
 
+import httpx
 from fastapi import APIRouter, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
@@ -19,6 +21,8 @@ origins = Settings().cors_origins
 telegram_bot_token = Settings().telegram_bot_token
 telegram_webhook_secret = Settings().telegram_webhook_secret
 telegram_mini_app_url = Settings().telegram_mini_app_url
+telegram_proxy_url = Settings().telegram_proxy_url
+TELEGRAM_STATUS: dict[str, object] = {"connected": False, "polls": 0}
 
 
 @router.post("/telegram/webhook")
@@ -37,6 +41,10 @@ async def telegram_webhook(
         update = await request.json()
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid update") from None
+    return telegram_reply(update)
+
+
+def telegram_reply(update: object) -> dict[str, object]:
     if not isinstance(update, dict):
         return {}
     message = update.get("message")
@@ -60,6 +68,47 @@ async def telegram_webhook(
             "web_app": {"url": telegram_mini_app_url},
         }]]},
     }
+
+
+async def telegram_polling_loop() -> None:
+    offset = 0
+    backoff = 2
+    initialized = False
+    async with httpx.AsyncClient(proxy=telegram_proxy_url or None, trust_env=False,
+                                 timeout=httpx.Timeout(15, read=45)) as client:
+        async def call(method: str, payload: dict) -> object:
+            response = await client.post(f"https://api.telegram.org/bot{telegram_bot_token}/{method}",
+                                         json=payload)
+            response.raise_for_status()
+            body = response.json()
+            if not body.get("ok"):
+                raise ValueError("Telegram API rejected the request")
+            return body["result"]
+
+        while True:
+            try:
+                if not initialized:
+                    await call("deleteWebhook", {"drop_pending_updates": False})
+                    initialized = True
+                updates = await call("getUpdates", {"offset": offset, "timeout": 35,
+                                                    "allowed_updates": ["message"]})
+                if not isinstance(updates, list):
+                    raise ValueError("Invalid Telegram updates")
+                if not TELEGRAM_STATUS["connected"]:
+                    logging.getLogger("uvicorn.error").info("Telegram polling connected")
+                TELEGRAM_STATUS.update(connected=True, polls=int(TELEGRAM_STATUS["polls"]) + 1)
+                for update in updates:
+                    reply = telegram_reply(update)
+                    if reply:
+                        method = str(reply.pop("method"))
+                        await call(method, reply)
+                    offset = int(update["update_id"]) + 1
+                backoff = 2
+            except (httpx.HTTPError, ValueError, KeyError):
+                TELEGRAM_STATUS["connected"] = False
+                logging.getLogger("uvicorn.error").warning("Telegram connection unavailable; retrying")
+                await asyncio.sleep(backoff)
+                backoff = min(60, backoff * 2)
 
 
 class TelegramAuth(BaseModel):
