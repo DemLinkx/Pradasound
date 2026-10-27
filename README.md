@@ -1,0 +1,143 @@
+# Prada Sound
+
+Совместная очередь музыки: хост создаёт комнату и воспроизводит музыку,
+гости входят по ссылке/QR, добавляют треки и удаляют свои. Хост меняет порядок.
+React + FastAPI + WebSocket, два контейнера: `web` (Caddy) и `api` (Uvicorn).
+
+Текущий MVP хранит комнаты, очередь и сессии Яндекса **в памяти**. Перезапуск
+API, обновление или откат очищают их. API должен работать в одном экземпляре
+с одним worker. PostgreSQL и Redis для этой версии не нужны.
+
+## Быстрый запуск из исходников
+
+Нужен Linux VPS с Docker Engine и Compose v2. Для публичного HTTPS направьте
+A-запись домена на IP VPS и откройте TCP 80/443. Если есть AAAA-запись, она
+тоже должна вести на этот сервер. Обычный статический/shared-хостинг не подходит:
+нужен постоянно работающий Python-процесс и поддержка WebSocket.
+
+В новом клоне репозитория:
+
+```sh
+git clone https://github.com/DemLinkx/Pradasound.git
+cd Pradasound
+cp .env.example .env
+chmod 600 .env
+```
+
+В `.env` замените две строки:
+
+```dotenv
+SITE_ADDRESS=music.example.com
+CORS_ORIGINS=["https://music.example.com"]
+```
+
+Запустите:
+
+```sh
+./infra/deploy.sh build
+curl -fsS https://music.example.com/healthcheck
+```
+
+Caddy обслуживает сайт, `/api` и WebSocket на одном домене и получает
+TLS-сертификат. API не публикует свой порт наружу. QR ведёт непосредственно
+в комнату на том же домене. Готовые Docker-образы включают frontend; отдельно
+устанавливать Node.js, Python и Caddy на VPS не требуется.
+
+Для проверки Docker на своём компьютере оставьте `SITE_ADDRESS=:80` и
+`CORS_ORIGINS=["http://localhost"]`, затем откройте `http://localhost`.
+Порты можно изменить через `HTTP_PORT`/`HTTPS_PORT`; при HTTP на другом порту
+укажите этот порт и в `CORS_ORIGINS`. Для LAN добавьте точный origin с LAN IP.
+
+## GitHub и последующие изменения
+
+Репозиторий проекта: [DemLinkx/Pradasound](https://github.com/DemLinkx/Pradasound).
+Рабочая ветка — `main`. Для нового компьютера клонируйте репозиторий командой
+из раздела быстрого запуска. После изменений:
+
+```sh
+git add .
+git diff --cached --stat
+git commit -m "Describe your change"
+git push
+```
+
+`.env`, `.local`, cookies, ключи, кеши и зависимости исключены из Git.
+Docker-контекст использует список разрешённых исходников: локальные секреты
+не копируются в образы. Не добавляйте секреты через `git add -f`.
+
+После push в `main` workflow запускает backend-тесты, собирает оба образа,
+поднимает Compose и проверяет сайт/API/WebSocket. Только после этих проверок
+он публикует `ghcr.io/demlinkx/pradasound-api` и `…-web` с тегами `latest`
+и `sha-<полный SHA коммита>`. Дополнительные GitHub Secrets не нужны: используется
+`GITHUB_TOKEN` с `packages:write`. Имена образов приводятся к нижнему регистру.
+Workflow собирает образы для Linux amd64; на ARM используйте сборку из исходников.
+
+Для небольшого VPS рекомендуется загружать готовые образы из GitHub вместо
+сборки на сервере. Первый запуск из GHCR, обновления, откат и логи описаны
+в [инструкции по развёртыванию](infra/README.md).
+
+Обычный цикл изменений:
+
+```sh
+# На компьютере разработчика
+git add .
+git commit -m "Describe your change"
+git push
+
+# На VPS после успешного workflow
+git pull --ff-only
+./infra/deploy.sh pull
+```
+
+Для этого режима в `.env` VPS должны быть заданы `PRADA_IMAGE_PREFIX` и
+`PRADA_IMAGE_TAG=latest` или тег конкретного коммита. При сборке на сервере
+используйте `./infra/deploy.sh build` вместо `pull`.
+
+## Музыкальные интеграции
+
+- **Яндекс Музыка:** существующий вход по device code; токен остаётся на API.
+  Прямую аудиоссылку получает аккаунт автора трека, воспроизводит браузер хоста.
+  Полный трек требует соответствующего доступа у провайдера. Доступность
+  на конкретном VPS/в регионе проверяется после запуска с реальным аккаунтом.
+- **YouTube в Docker:** видимый iframe согласно `AGENTS.md`; серверное извлечение
+  через yt-dlp принудительно отключено. Метаданные доступны через oEmbed и,
+  при настройке `YOUTUBE_API_KEY`, Data API. Ограничения встраивания владельца
+  видео сохраняются. Аудиокроссфейд остаётся для HTML5-аудио Яндекса.
+- **YouTube локально вне Docker:** прежний экспериментальный аудиорежим сохранён;
+  настройка `YOUTUBE_AUDIO_ENABLED=false` переключает его на iframe.
+- **Telegram:** необязателен; сайт работает без бота. Настройка —
+  в [docs/telegram-mini-app.md](docs/telegram-mini-app.md).
+
+Тесты развёртывания не обращаются к музыкальным сервисам и не подтверждают
+работоспособность их API. Нагрузочная цель 5000–10000 соединений не измерена;
+Docker-конфигурация не является подтверждением такой ёмкости.
+
+## Локальная разработка без Docker
+
+Python 3.12+, uv и Node.js 24+. Для Vite задайте в корневом `.env`:
+
+```dotenv
+CORS_ORIGINS=["http://localhost:5173","http://127.0.0.1:5173"]
+```
+
+```sh
+uv sync --project backend --locked --python 3.12
+uv run --directory backend uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1
+```
+
+В другом терминале:
+
+```sh
+cd frontend
+npm ci
+npm run dev -- --host 0.0.0.0
+```
+
+Проверки:
+
+```sh
+uv run --directory backend --locked pytest
+npm --prefix frontend run build
+# Для уже запущенного Docker-сайта:
+uv run --project backend --locked python infra/smoke.py http://localhost
+```

@@ -1,0 +1,20 @@
+[Unit]
+Description=Prada Sound API and Telegram webhook
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=prada
+Group=prada
+WorkingDirectory=/srv/prada-sound/backend
+ExecStart=/srv/prada-sound/backend/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1
+Restart=always
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+LimitNOFILE=20000
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

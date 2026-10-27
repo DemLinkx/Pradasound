@@ -1,0 +1,76 @@
+name: prada-sound
+
+services:
+  api:
+    image: ${PRADA_IMAGE_PREFIX:-prada-sound}-api:${PRADA_IMAGE_TAG:-local}
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      args:
+        SOURCE_URL: ${PRADA_SOURCE_URL:-}
+        REVISION: ${PRADA_IMAGE_TAG:-local}
+    environment:
+      CORS_ORIGINS: ${CORS_ORIGINS:-["http://localhost"]}
+      # Production uses the visible YouTube iframe; extraction is local-only.
+      YOUTUBE_AUDIO_ENABLED: "false"
+      YOUTUBE_API_KEY: ${YOUTUBE_API_KEY:-}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_WEBHOOK_SECRET: ${TELEGRAM_WEBHOOK_SECRET:-}
+      TELEGRAM_MINI_APP_URL: ${TELEGRAM_MINI_APP_URL:-}
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 1g
+    pids_limit: 128
+    ulimits:
+      nofile:
+        soft: 20000
+        hard: 20000
+    stop_grace_period: 30s
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  web:
+    image: ${PRADA_IMAGE_PREFIX:-prada-sound}-web:${PRADA_IMAGE_TAG:-local}
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      args:
+        SOURCE_URL: ${PRADA_SOURCE_URL:-}
+        REVISION: ${PRADA_IMAGE_TAG:-local}
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:-:80}
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 256m
+    pids_limit: 128
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  caddy_data:
+  caddy_config:

@@ -1,0 +1,1 @@
+"""Prada Sound backend application."""
