@@ -184,7 +184,44 @@ const STYLES = `
   .maincol,.sidecol,.card{min-width:0}@media(min-width:851px){.dashboard{grid-template-columns:minmax(0,1fr) minmax(0,340px)}}
   @media(max-width:850px){.dashboard,.landing{grid-template-columns:minmax(0,1fr)}.maincol,.sidecol,.card{min-width:0}.landing{min-height:0}.roomhead{display:block}.roomhead .actions{margin-top:16px}.hero{grid-template-columns:minmax(0,1fr) auto}.art{width:145px}}
   @media(max-width:550px){.shell{width:min(100% - 24px,1160px);padding-top:18px}.cardpad,.entry{padding:20px}.topbar{margin-bottom:26px}.hero{grid-template-columns:1fr}.miniPlayer{width:100%;max-width:320px}.art{width:130px;position:absolute;right:-20px;top:-30px;opacity:.35}.heroText{position:relative}.share{align-items:flex-start}.qr{width:124px;height:124px}.addform{display:grid}.button{padding:11px 14px}.deck{padding:18px}.deck-head{grid-template-columns:54px minmax(0,1fr);gap:12px}.deck-art{width:54px;height:54px;border-radius:12px}.deck-onair{grid-column:2;justify-self:start;margin-top:-5px}.deck-track h3{font-size:16px}.deck-timeline{margin:18px 0}.deck-next-label{display:none}.deck-controls{gap:10px}.deck-volume{gap:6px}.deck-volume-range{width:64px}}
-  @media(prefers-reduced-motion:reduce){.bars i{animation:none}.button{transition:none}}
+  /* Moving light, quiet surfaces and a single playback stage. */
+  .app{background:#0c0e11}
+  .app:before{z-index:0;inset:-22%;opacity:1;background:radial-gradient(ellipse 34% 32% at 8% 17%,#2e435ba3,transparent 82%),radial-gradient(ellipse 33% 29% at 88% 10%,#76483291,transparent 82%),radial-gradient(ellipse 30% 30% at 65% 82%,#30465c8f,transparent 85%),radial-gradient(ellipse 28% 28% at 12% 86%,#69422d80,transparent 85%);animation:ambientDrift 20s ease-in-out infinite alternate;will-change:transform}
+  .app:after{content:"";position:fixed;inset:0;z-index:0;pointer-events:none;opacity:.13;background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.5'/%3E%3C/svg%3E")}
+  @keyframes ambientDrift{0%{transform:translate3d(-2%,0,0) scale(1)}50%{transform:translate3d(3%,-3%,0) scale(1.08)}100%{transform:translate3d(-1%,4%,0) scale(1.04)}}
+  .shell{position:relative;z-index:1;width:min(1440px,calc(100% - 64px));padding-top:34px}
+  .brandmark{background:radial-gradient(circle at 30% 16%,#4269b4,#132547 63%,#0a1225);color:#dce8ff;border:1px solid #87a8db5c;box-shadow:inset 0 1px #dce8ff54,0 8px 26px #0006}
+  .brandmark svg{width:26px;height:26px}
+  .eyebrow{color:#d99661}.dot{background:#d99661;box-shadow:none}.connected .dot{box-shadow:none}
+  .landing h1 em{color:#d99661}.card{background:linear-gradient(155deg,#242628e8,#171a1de8);border-color:#ffffff1b}
+  .button.primary{background:#cb8656;border-color:#dc9b69;box-shadow:0 10px 25px #733d2530}.button.primary:hover:not(:disabled){background:#daa071}
+  .button:focus-visible,input:focus-visible,a:focus-visible,.deck-play:focus-visible,.deck-next:focus-visible,.deck-volume-icon:focus-visible{outline-color:#dfad7b}
+  .dashboard{grid-template-columns:minmax(0,1.45fr) minmax(360px,.9fr);gap:22px}.maincol,.sidecol{gap:18px}
+  .hostcard{padding:12px 16px;border-color:#a36c4059;background:linear-gradient(100deg,#54382c99,#242629c9 55%,#1b1e21c9)}.hostbadge{color:#deb28a;border-color:#bd855a80}
+  .deck{padding:28px 30px 24px;background:radial-gradient(circle at 84% 8%,#8b563836,transparent 48%),linear-gradient(145deg,#242629ed,#171a1ded 72%);border-color:#d59b7040}
+  .deck-stage{display:grid;grid-template-columns:minmax(0,1fr) minmax(210px,36%);align-items:stretch;gap:24px;min-height:228px;padding-bottom:24px;border-bottom:1px solid #ffffff1b}
+  .deck-stage-copy{display:flex;flex-direction:column;align-items:flex-start;min-width:0;padding:8px 0}
+  .deck-status{display:flex;gap:12px;justify-content:space-between;align-items:center;width:100%;margin-bottom:auto}
+  .deck-stage-copy h2{font-size:clamp(28px,3.4vw,48px);line-height:1.04;letter-spacing:-.06em;margin:17px 0 10px;overflow-wrap:anywhere}
+  .deck-stage-copy p{margin:0;color:#aca9a6;font-size:14px}
+  .deck-stage-copy .bars{margin:auto 0 0;padding-top:20px}
+  .deck-stage-copy .stage-add{margin-top:auto}
+  .deck-onair.playing{color:#e7ad7e}.deck-onair.playing i{background:#d99661;box-shadow:0 0 9px #d9966190}
+  .miniPlayer{width:100%;height:auto;min-height:228px;aspect-ratio:16/10;border-radius:20px;border-color:#ffffff28;background:#101417;box-shadow:inset 0 1px #ffffff12,0 18px 38px #0005}
+  .miniPlayer .spectrum{background:radial-gradient(ellipse at 50% 50%,#bb784327,transparent 66%),linear-gradient(150deg,#17212c,#101417 66%)}
+  .spectrum i{background:linear-gradient(#e0af87,#a9643e)}.bars i{background:#c98a5b}
+  .deck-timeline{margin:24px 0 20px}.deck-range{background:linear-gradient(90deg,#c78658 var(--fill),#ffffff2a var(--fill))}.deck-range::-webkit-slider-thumb{background:#c78658;border-color:#f2c6a5;box-shadow:0 0 0 4px #c7865825}.deck-range::-moz-range-thumb{background:#c78658;border-color:#f2c6a5;box-shadow:0 0 0 4px #c7865825}
+  .deck-play{border-color:#e1a879;background:linear-gradient(145deg,#e2ab7b,#b77347);box-shadow:0 8px 20px #6a3b2538}
+  .deck-message:empty{display:none}.deck-message{margin-top:12px}
+  .share-card{padding:22px 24px}.share-card .sectionhead{margin-bottom:10px}.share-card .share{display:grid;grid-template-columns:minmax(0,1fr) 108px;gap:14px}.share-card .sharetext{min-width:0}.share-card .sharetext p{margin:4px 0 10px}.share-card .sharelink{font-size:12px;padding:10px}.share-card .roomid{margin:10px 0 0}.share-card .qr{width:108px;height:108px}
+  .yandex-card{scroll-margin-top:24px}.likes{max-height:min(48vh,520px);overscroll-behavior:contain}.likes li{padding:10px 12px}.likes li:hover,.queue li:hover{border-color:#d39a6b4b}
+  .sidecol.music-ready .yandex-card{order:-1}
+  .authbox{border-color:#ad744c77;background:linear-gradient(120deg,#9d633326,#ffffff05)}.code{border-color:#b6805970}
+  .queue li.current{background:#c786581c;border-color:#bd825562}.queue .current .index{color:#e0a573}
+  @media(max-width:1000px){.dashboard{grid-template-columns:minmax(0,1fr) minmax(300px,.8fr)}.deck-stage{grid-template-columns:minmax(0,1fr) 210px}.miniPlayer{min-height:205px}}
+  @media(max-width:850px){.dashboard{grid-template-columns:1fr}.shell{width:min(100% - 32px,680px)}.deck-stage{grid-template-columns:minmax(0,1fr) minmax(170px,36%)}.sidecol.music-ready .yandex-card{order:0}}
+  @media(max-width:550px){.shell{width:min(100% - 24px,680px)}.deck{padding:20px}.deck-stage{grid-template-columns:1fr;min-height:0;gap:16px;padding-bottom:20px}.deck-stage-copy{min-height:145px}.deck-stage-copy h2{font-size:clamp(27px,8vw,38px)}.miniPlayer{min-height:0;aspect-ratio:16/9}.share-card{padding:20px}.share-card .share{grid-template-columns:minmax(0,1fr) 96px}.share-card .qr{width:96px;height:96px}.likes{max-height:400px}.brand{font-size:20px}}
+  @media(prefers-reduced-motion:reduce){.app:before,.bars i,.spectrum i{animation:none}.button{transition:none}}
 `;
 
 export default function App() {
@@ -879,7 +916,7 @@ export default function App() {
   const isYandex = currentTrack?.startsWith('yandex_');
   const nowTitle = currentTrack ? trackTitles[currentTrack] || (isYandex ? 'Трек Яндекс Музыки' : `YouTube · ${currentTrack}`) : 'Музыка начинается здесь';
   return <main className={`app ${telegramInitData ? 'telegram-app' : ''}`}><style>{STYLES}</style><div className="shell">
-    <header className="topbar"><div className="brand"><span className="brandmark">♫</span> PRADA SOUND</div>
+    <header className="topbar"><div className="brand"><span className="brandmark"><svg viewBox="0 0 32 32" fill="none" aria-hidden="true"><path d="M6 23.5c4.7-7.3 9-11.2 20-15M6 16c6.8-3.9 13-5.4 20-4.5M8 27c3.9-4.9 8.3-7.1 16-8" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"/><circle cx="8" cy="27" r="2" fill="currentColor"/></svg></span> PRADA SOUND</div>
       {me ? <span className="profile-chip"><Avatar profile={me} size={32} /><span>{profileLabel(me)}</span></span> :
         <span className="pill"><span className="dot" /> PRIVATE MUSIC ROOM</span>}</header>
     {storageWarning && <p className="notice" role="alert">{storageWarning}</p>}
@@ -902,6 +939,7 @@ export default function App() {
         <div className="roomstatus"><span className={`pill ${status === 'connected' ? 'connected' : ''}`} role="status"><span className="dot" />{statusLabel}</span>
           <span className="pill">{memberCount} в комнате</span></div>
       </div><div className="actions">
+        <button className="button ghost" onClick={() => document.getElementById('share-room')?.scrollIntoView({ behavior: 'smooth', block: 'center' })}>Пригласить</button>
         {status === 'closed' && <button className="button" onClick={() => setAttempt((value) => value + 1)}>Подключиться снова</button>}
         <button className="button ghost" onClick={() => { setSession(null); setQueueItems([]); setTrackId(''); setError(''); }}>Выйти</button>
       </div></div>
@@ -912,26 +950,28 @@ export default function App() {
             {mainProfile?.username && <small>{mainProfile.name}</small>}</div>
           <span className="hostbadge">MAIN</span>
         </section>
-        <section className="card cardpad hero">
+        {session.role === 'Member' && <section className="card cardpad hero">
           <div className="heroText"><span className="eyebrow">{currentTrack ? 'СЕЙЧАС ИГРАЕТ' : 'ГОТОВО К СТАРТУ'}</span>
             <h2>{nowTitle}</h2><p className="muted small">{currentTrack ? (isYandex ? 'Яндекс Музыка' : 'YouTube') : 'Добавьте первый трек в очередь'}</p>
             {currentTrack && <div className="bars" aria-hidden="true">{Array.from({ length: 20 }, (_, i) => <i key={i} />)}</div>}
           </div>
-          {session.role === 'Main' ? <div className="miniPlayer">
-            {fallbackId === currentTrack && currentTrack ? <div key={currentKey} ref={ytMount} className="fallbackVideo" /> :
-            <div className={`spectrum ${currentTrack && playingKey === currentKey ? '' : 'idle'}`} aria-label="Аудиовизуализатор">
-              {Array.from({ length: 17 }, (_, i) => <i key={i} style={{ '--n': i } as CSSProperties} />)}
-            </div>}
-          </div> : <div className="art" aria-hidden="true">{currentTrack && !isYandex ? <img src={`https://i.ytimg.com/vi/${currentTrack}/hqdefault.jpg`} alt="" /> : <span className="record" />}</div>}
-        </section>
+          <div className="art" aria-hidden="true">{currentTrack && !isYandex ? <img src={`https://i.ytimg.com/vi/${currentTrack}/hqdefault.jpg`} alt="" /> : <span className="record" />}</div>
+        </section>}
         {session.role === 'Main' && <section className="card deck" aria-label="Плеер хоста">
-          <div className="deck-head">
-            <div className="deck-art" aria-hidden="true">{currentTrack && !isYandex ?
-              <img src={`https://i.ytimg.com/vi/${currentTrack}/hqdefault.jpg`} alt="" /> : <span>♫</span>}</div>
-            <div className="deck-track"><span className="eyebrow">ПЛЕЕР ХОСТА</span>
-              <h3>{nowTitle}</h3><p>{currentTrack ? (isYandex ? 'Яндекс Музыка' : 'YouTube') : 'Очередь пока пуста'}</p></div>
-            <span className={`deck-onair ${playingKey === currentKey && currentTrack ? 'playing' : ''}`}>
-              <i />{playingKey === currentKey && currentTrack ? 'В ЭФИРЕ' : 'ОЖИДАНИЕ'}</span>
+          <div className="deck-stage">
+            <div className="deck-stage-copy"><div className="deck-status"><span className="eyebrow">{currentTrack ? 'СЕЙЧАС ИГРАЕТ' : 'ПЛЕЕР ХОСТА'}</span>
+              <span className={`deck-onair ${playingKey === currentKey && currentTrack ? 'playing' : ''}`}><i />{playingKey === currentKey && currentTrack ? 'В ЭФИРЕ' : 'ОЖИДАНИЕ'}</span></div>
+              <h2>{currentTrack ? nowTitle : 'Очередь пока пуста'}</h2>
+              <p>{currentTrack ? (isYandex ? 'Яндекс Музыка' : 'YouTube') : 'Добавьте первый трек, чтобы начать.'}</p>
+              {currentTrack ? <div className="bars" aria-hidden="true">{Array.from({ length: 20 }, (_, i) => <i key={i} />)}</div> :
+                <button className="button tiny stage-add" onClick={() => document.getElementById('add-track')?.scrollIntoView({ behavior: 'smooth', block: 'center' })}>Добавить трек ↓</button>}
+            </div>
+            <div className="miniPlayer">
+              {fallbackId === currentTrack && currentTrack ? <div key={currentKey} ref={ytMount} className="fallbackVideo" /> :
+              <div className={`spectrum ${currentTrack && playingKey === currentKey ? '' : 'idle'}`} aria-label="Аудиовизуализатор">
+                {Array.from({ length: 17 }, (_, i) => <i key={i} style={{ '--n': i } as CSSProperties} />)}
+              </div>}
+            </div>
           </div>
           <div className="deck-timeline">
             <span>{clockTime(playbackTime)}</span>
@@ -1005,7 +1045,7 @@ export default function App() {
               setStreamAttempt((value) => value + 1);
             }}>Повторить загрузку аудио</button>}
             {!audioUrl && !audioError && fallbackId !== currentTrack && <p className="muted small">Получаем аудиопоток…</p>}
-          </> : <p className="muted small">Добавьте первый трек — музыка начнётся здесь.</p>}</div>
+          </> : null}</div>
         </section>}
         <section className="card cardpad"><div className="sectionhead"><div><span className="eyebrow">ОБЩИЙ РИТМ</span><h3>Очередь треков</h3></div><span className="pill">{queueItems.length} треков</span></div>
           <div aria-live="polite">{queueItems.length ? <ol className="queue">{queueItems.map((item, index) => <li className={index === 0 ? 'current' : ''} key={item.id}
@@ -1027,13 +1067,13 @@ export default function App() {
             {item.owner_id === ownerId && <button className="button tiny" aria-label="Удалить свой трек" disabled={queueActionPending || status !== 'connected'} onClick={() => changeQueue('remove_track', item.id)}>Удалить</button>}
           </li>)}</ol> : <p className="muted small">Здесь скоро появится музыка. Добавьте первый трек.</p>}</div>
         </section>
-        <section className="card cardpad"><div className="sectionhead"><div><span className="eyebrow">ВАШ ВКЛАД</span><h3>Добавить трек</h3></div></div>
+        <section className="card cardpad" id="add-track"><div className="sectionhead"><div><span className="eyebrow">ВАШ ВКЛАД</span><h3>Добавить трек</h3></div></div>
           <form className="addform" onSubmit={addTrack}><input aria-label="YouTube ссылка или Video ID" value={trackId} onChange={(event) => setTrackId(event.target.value)} required
             placeholder="Ссылка YouTube или Video ID" /><button className="button primary" disabled={status !== 'connected' || !trackId.trim() || loadingMetadata}>{loadingMetadata ? 'Ищем название…' : '+ В очередь'}</button></form>
           <p className="muted small">Подойдут youtube.com/watch?v=…, youtu.be/… или 11-значный ID.</p>
         </section>
-      </div><div className="sidecol">
-        <section className="card cardpad"><div className="sectionhead"><div><span className="eyebrow">ПРИГЛАСИТЬ ДРУЗЕЙ</span><h3>Поделиться комнатой</h3></div></div>
+      </div><div className={`sidecol ${yandexTracks.length ? 'music-ready' : ''}`}>
+        <section className="card cardpad share-card" id="share-room"><div className="sectionhead"><div><span className="eyebrow">ПРИГЛАСИТЬ ДРУЗЕЙ</span><h3>Поделиться комнатой</h3></div></div>
           <div className="share"><div className="sharetext"><p className="muted small">Отправьте ссылку или покажите QR-код.</p>
             <button className="button sharelink" title={inviteUrl} onClick={() => void copy(inviteUrl, 'Ссылка')}>{inviteUrl}</button>
             {telegramInitData && <button className="button tiny invite-button" onClick={() =>
@@ -1042,7 +1082,7 @@ export default function App() {
             <p className="roomid mono">ID: {session.lobby_id}</p></div>
             {qr ? <svg className="qr" viewBox="0 0 53 53" role="img" aria-label="QR-код приглашения"><path fill="#111" d={qr} /></svg> : <span className="muted small">Ссылка слишком длинная для QR</span>}
           </div>{['localhost', '127.0.0.1'].includes(location.hostname) && <p className="muted small">Для входа с телефона откройте сайт по адресу компьютера в вашей сети или по домену — localhost на телефоне не откроется.</p>}</section>
-        <section className="card cardpad" id="yandex-auth"><div className="sectionhead"><div><span className="eyebrow">ВАША МУЗЫКА</span><h3>Яндекс Музыка</h3></div></div>
+        <section className="card cardpad yandex-card" id="yandex-auth"><div className="sectionhead"><div><span className="eyebrow">ВАША МУЗЫКА</span><h3>Яндекс Музыка</h3></div></div>
           <p className="muted small">Подключите аккаунт, чтобы добавить лайкнутые треки. Добавленные вами треки звучат на устройстве хоста с вашего доступа к Яндекс Музыке.</p>
           <button className="button primary" onClick={() => void startYandexLogin()} disabled={loadingLikes}>{yandexConnected ? 'Подключить заново' : 'Подключить Яндекс Музыку →'}</button>
           {yandexLogin && <div className="authbox" style={{ marginTop: 16 }}>
