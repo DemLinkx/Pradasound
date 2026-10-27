@@ -185,11 +185,16 @@ const STYLES = `
   @media(max-width:850px){.dashboard,.landing{grid-template-columns:minmax(0,1fr)}.maincol,.sidecol,.card{min-width:0}.landing{min-height:0}.roomhead{display:block}.roomhead .actions{margin-top:16px}.hero{grid-template-columns:minmax(0,1fr) auto}.art{width:145px}}
   @media(max-width:550px){.shell{width:min(100% - 24px,1160px);padding-top:18px}.cardpad,.entry{padding:20px}.topbar{margin-bottom:26px}.hero{grid-template-columns:1fr}.miniPlayer{width:100%;max-width:320px}.art{width:130px;position:absolute;right:-20px;top:-30px;opacity:.35}.heroText{position:relative}.share{align-items:flex-start}.qr{width:124px;height:124px}.addform{display:grid}.button{padding:11px 14px}.deck{padding:18px}.deck-head{grid-template-columns:54px minmax(0,1fr);gap:12px}.deck-art{width:54px;height:54px;border-radius:12px}.deck-onair{grid-column:2;justify-self:start;margin-top:-5px}.deck-track h3{font-size:16px}.deck-timeline{margin:18px 0}.deck-next-label{display:none}.deck-controls{gap:10px}.deck-volume{gap:6px}.deck-volume-range{width:64px}}
   /* Dark film grain and a single playback stage. */
-  .app{background:#242629}
+  .app{background:#191a1c}
   .app:before{z-index:0;inset:0;opacity:1;background:radial-gradient(ellipse at 80% 8%,#38291f55,transparent 55%),radial-gradient(ellipse at 10% 85%,#1f2a3155,transparent 55%);animation:none}
   .app:after{content:"";position:fixed;inset:-30px;z-index:0;pointer-events:none;opacity:.85;mix-blend-mode:multiply;background-size:234px 234px;background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3CfeComponentTransfer%3E%3CfeFuncR type='linear' slope='2.2' intercept='-.6'/%3E%3CfeFuncG type='linear' slope='2.2' intercept='-.6'/%3E%3CfeFuncB type='linear' slope='2.2' intercept='-.6'/%3E%3C/feComponentTransfer%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");animation:filmGrain .35s steps(1,end) infinite;will-change:transform}
   @keyframes filmGrain{0%{transform:translate(0,0)}10%{transform:translate(-13px,9px)}20%{transform:translate(8px,-16px)}30%{transform:translate(-18px,-8px)}40%{transform:translate(15px,12px)}50%{transform:translate(-7px,-19px)}60%{transform:translate(19px,-5px)}70%{transform:translate(-16px,17px)}80%{transform:translate(6px,-11px)}90%{transform:translate(13px,19px)}}
-  .shell{position:relative;z-index:1;width:min(1440px,calc(100% - 64px));padding-top:34px}
+  .shell{position:relative;z-index:1;width:min(1440px,calc(100% - 64px));padding-top:22px}.topbar{margin-bottom:24px}
+  .landing{min-height:0;padding-top:clamp(24px,4vh,48px)}
+  .landing-copy{animation:headlineEnter .65s ease-out both}.headline-word{display:inline-block;transition:transform .3s ease,color .3s ease}.headline-word+.headline-word{margin-left:.08em}.headline-word:hover,.headline-word:active{transform:translateY(-5px);color:#fff}.headline-accent .headline-word:hover,.headline-accent .headline-word:active{color:#ffca98}.headline-accent{display:inline-block;animation:accentPulse 7s ease-in-out infinite}
+  @keyframes headlineEnter{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}@keyframes accentPulse{0%,100%{color:#f9a15b}50%{color:#ffc18a}}
+  .copy-toast{position:fixed;z-index:10;top:max(18px,env(safe-area-inset-top));right:24px;max-width:min(380px,calc(100vw - 32px));margin:0;padding:12px 18px;border:1px solid #db996977;border-radius:14px;background:#24201ff2;color:#ffd0ac;box-shadow:0 12px 35px #0008;pointer-events:none;animation:toastFade 3.6s ease both}
+  @keyframes toastFade{0%{opacity:0;transform:translateY(-8px)}8%,84%{opacity:1;transform:translateY(0)}100%{opacity:0;transform:translateY(-8px)}}
   .brandmark{background:radial-gradient(circle at 30% 16%,#4269b4,#132547 63%,#0a1225);color:#dce8ff;border:1px solid #87a8db5c;box-shadow:inset 0 1px #dce8ff54,0 8px 26px #0006}
   .brandmark svg{width:26px;height:26px}
   .eyebrow{color:#ffac6b}.dot{background:#ffac6b;box-shadow:none}.connected .dot{box-shadow:none}
@@ -222,8 +227,8 @@ const STYLES = `
   .queue li.current{background:#c786581c;border-color:#bd825562}.queue .current .index{color:#e0a573}
   @media(max-width:1000px){.dashboard{grid-template-columns:minmax(0,1fr) minmax(300px,.8fr)}.deck-stage{grid-template-columns:minmax(0,1fr) 210px}.miniPlayer{min-height:205px}}
   @media(max-width:850px){.dashboard{grid-template-columns:1fr}.shell{width:min(100% - 32px,680px)}.deck-stage{grid-template-columns:minmax(0,1fr) minmax(170px,36%)}.sidecol.music-ready .yandex-card{order:0}}
-  @media(max-width:550px){.shell{width:min(100% - 24px,680px)}.deck{padding:20px}.deck-stage{grid-template-columns:1fr;min-height:0;gap:16px;padding-bottom:20px}.deck-stage-copy{min-height:145px}.deck-stage-copy h2{font-size:clamp(27px,8vw,38px)}.miniPlayer{min-height:0;aspect-ratio:16/9}.share-card{padding:20px}.share-card .share{grid-template-columns:minmax(0,1fr) 96px}.share-card .qr{width:96px;height:96px}.likes{max-height:400px}.brand{font-size:20px}}
-  @media(prefers-reduced-motion:reduce){.app:after,.bars i,.spectrum i{animation:none}.button{transition:none}}
+  @media(max-width:550px){.shell{width:min(100% - 24px,680px);padding-top:16px}.topbar{margin-bottom:18px}.landing{padding-top:12px}.copy-toast{right:16px}.deck{padding:20px}.deck-stage{grid-template-columns:1fr;min-height:0;gap:16px;padding-bottom:20px}.deck-stage-copy{min-height:145px}.deck-stage-copy h2{font-size:clamp(27px,8vw,38px)}.miniPlayer{min-height:0;aspect-ratio:16/9}.share-card{padding:20px}.share-card .share{grid-template-columns:minmax(0,1fr) 96px}.share-card .qr{width:96px;height:96px}.likes{max-height:400px}.brand{font-size:20px}}
+  @media(prefers-reduced-motion:reduce){.app:after,.bars i,.spectrum i,.landing-copy,.headline-accent,.copy-toast{animation:none}.button,.headline-word{transition:none}.headline-word:hover,.headline-word:active{transform:none}}
 `;
 
 export default function App() {
@@ -264,7 +269,8 @@ export default function App() {
   const [storageWarning, setStorageWarning] = useState('');
   const [creating, setCreating] = useState(false);
   const [loadingMetadata, setLoadingMetadata] = useState(false);
-  const [copyNotice, setCopyNotice] = useState('');
+  const [copyNotice, setCopyNotice] = useState<{ message: string; id: number } | null>(null);
+  const copyNoticeId = useRef(0);
   const [attempt, setAttempt] = useState(0);
   const [yandexLogin, setYandexLogin] = useState<YandexLogin | null>(null);
   const [yandexTracks, setYandexTracks] = useState<YandexTrack[]>([]);
@@ -303,6 +309,12 @@ export default function App() {
   const retryCount = useRef(0);
   const lastRoom = useRef('');
   const draggingItem = useRef('');
+
+  useEffect(() => {
+    if (!copyNotice) return;
+    const timer = window.setTimeout(() => setCopyNotice(null), 3600);
+    return () => window.clearTimeout(timer);
+  }, [copyNotice]);
 
   useEffect(() => {
     volumeRef.current = volume / 100;
@@ -694,6 +706,7 @@ export default function App() {
 
   async function copy(value: string, label: string) {
     const copied = `${label} скопирован${label === 'Ссылка' ? 'а' : ''}.`;
+    const notify = (message: string) => setCopyNotice({ message, id: ++copyNoticeId.current });
     const fallback = () => {
       const input = document.createElement('textarea');
       input.value = value; input.style.position = 'fixed'; input.style.opacity = '0';
@@ -702,9 +715,9 @@ export default function App() {
       try { ok = document.execCommand('copy'); } catch {}
       input.remove(); return ok;
     };
-    if (!navigator.clipboard?.writeText) { setCopyNotice(fallback() ? copied : 'Не удалось скопировать. Выделите и скопируйте вручную.'); return; }
-    try { await navigator.clipboard.writeText(value); setCopyNotice(copied); }
-    catch { setCopyNotice(fallback() ? copied : 'Не удалось скопировать. Выделите и скопируйте вручную.'); }
+    if (!navigator.clipboard?.writeText) { notify(fallback() ? copied : 'Не удалось скопировать. Выделите и скопируйте вручную.'); return; }
+    try { await navigator.clipboard.writeText(value); notify(copied); }
+    catch { notify(fallback() ? copied : 'Не удалось скопировать. Выделите и скопируйте вручную.'); }
   }
 
   function enqueue(id: string, title?: string) {
@@ -923,9 +936,9 @@ export default function App() {
         <span className="pill"><span className="dot" /> PRIVATE MUSIC ROOM</span>}</header>
     {storageWarning && <p className="notice" role="alert">{storageWarning}</p>}
     {error && <p className="notice" role="alert">{error}</p>}
-    {copyNotice && <p className="notice" role="status">{copyNotice}</p>}
+    {copyNotice && <p key={copyNotice.id} className="copy-toast" role="status">{copyNotice.message}</p>}
     {!session ? <div className="landing">
-      <div><span className="eyebrow">YOUR NIGHT · YOUR SOUND</span><h1>Одна комната.<br /><em>Один вайб.</em></h1>
+      <div className="landing-copy"><span className="eyebrow">YOUR NIGHT · YOUR SOUND</span><h1><span className="headline-word">Одна</span>{' '}<span className="headline-word">комната.</span><br /><em className="headline-accent"><span className="headline-word">Один</span>{' '}<span className="headline-word">вайб.</span></em></h1>
         <p className="muted">Создайте вечеринку, позовите друзей и собирайте общий плейлист вместе. Музыка звучит на устройстве хоста.</p></div>
       <section className="card entry"><span className="eyebrow">НАЧАТЬ ВЕЧЕРИНКУ</span><h2>Музыка ждёт вас</h2>
         <p className="muted small">Создайте свою комнату или войдите по приглашению.</p>
