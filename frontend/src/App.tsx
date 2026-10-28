@@ -357,7 +357,7 @@ export default function App() {
       const current = audioPlayers[activeAudioRef.current].current;
       if (current) current.volume = volumeRef.current;
     }
-    ytPlayer.current?.setVolume(volume);
+    ytPlayer.current?.setVolume?.(volume);
   }, [volume]);
 
   function syncPlaybackTime(player: HTMLAudioElement) {
@@ -821,7 +821,7 @@ export default function App() {
     if (!currentTrack || fallbackId !== currentTrack || session?.role !== 'Main') return;
     const timer = window.setInterval(() => {
       const player = ytPlayer.current;
-      if (!player) return;
+      if (!player || typeof player.getDuration !== 'function' || typeof player.getCurrentTime !== 'function') return;
       const duration = player.getDuration();
       const time = player.getCurrentTime();
       setPlaybackDuration(Number.isFinite(duration) ? duration : 0);
