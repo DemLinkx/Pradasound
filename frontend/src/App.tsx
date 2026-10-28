@@ -408,7 +408,7 @@ export default function App() {
   async function musicJson(url: string, options: RequestInit = {}): Promise<MusicLibrary> {
     const response = await fetch(url, options);
     const data = await response.json();
-    if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : `Сервис не ответил (HTTP ${response.status}).`);
+    if (!response.ok) throw Object.assign(new Error(typeof data.detail === 'string' ? data.detail : `Сервис не ответил (HTTP ${response.status}).`), { status: response.status });
     return data as MusicLibrary;
   }
 
@@ -432,7 +432,8 @@ export default function App() {
         .then((library) => { if (!controller.signal.aborted) acceptMusic(provider, library); })
         .catch((cause) => { if (!controller.signal.aborted) {
           setMusicError(cause instanceof Error ? cause.message : 'Подключите сервис заново.');
-          setMusicSessions((previous) => { const next = { ...previous }; delete next[provider]; return next; });
+          if (cause && typeof cause === 'object' && 'status' in cause && cause.status === 401)
+            setMusicSessions((previous) => { const next = { ...previous }; delete next[provider]; return next; });
         } });
     }
     return () => controllers.forEach((controller) => controller.abort());
@@ -898,6 +899,14 @@ export default function App() {
       const next = await musicJson(`/api/music/${provider}/tracks?cursor=${encodeURIComponent(library.next_cursor)}`, {
         signal, headers: { 'X-Music-Session': library.session } });
       if (!signal.aborted) acceptMusic(provider, next, true);
+    });
+  }
+
+  function restoreMusic() {
+    void musicOperationRequest(async (signal, provider) => {
+      const handle = musicSessions[provider]; if (!handle) return;
+      const library = await musicJson(`/api/music/${provider}/tracks`, { signal, headers: { 'X-Music-Session': handle } });
+      if (!signal.aborted) acceptMusic(provider, library);
     });
   }
 
@@ -1406,6 +1415,7 @@ export default function App() {
             {musicProvider === 'spotify' && <label className="music-consent"><input type="checkbox" checked={spotifyConsent} onChange={(event) => setSpotifyConsent(event.target.checked)} />Разрешаю подбирать и воспроизводить записи через YouTube</label>}
             {musicBusy && <p className="muted small" role="status">Загружаем музыку…</p>}
             {musicError && <p className="notice" role="alert">{musicError}</p>}
+            {!musicLibrary && musicSessions[musicProvider] && <button className="button tiny" disabled={musicBusy} onClick={restoreMusic}>Восстановить подключение</button>}
             {musicLibrary && <>
               <div className="row" style={{ justifyContent: 'space-between', flexWrap: 'wrap' }}><p className="muted small">{musicLibrary.authenticated ? 'Библиотека подключена' : 'Публичный импорт'} · {musicLibrary.tracks.length} треков</p>
                 <button className="button tiny" disabled={musicBusy} onClick={() => void disconnectMusic()}>Отключить</button></div>

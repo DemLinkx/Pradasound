@@ -11,15 +11,18 @@ from app.providers import music
 
 
 @pytest.fixture(autouse=True)
-def clear_state():
+def clear_state(monkeypatch):
+    monkeypatch.setattr(music.settings, "cors_origins", ["http://localhost:5173"])
     music.PENDING.clear()
     music.SESSIONS.clear()
     music.TICKETS.clear()
     music.RESOLVE_CACHE.clear()
+    music.ROUTE_FAILURES.clear()
     yield
     music.PENDING.clear()
     music.SESSIONS.clear()
     music.TICKETS.clear()
+    music.ROUTE_FAILURES.clear()
 
 
 @pytest.fixture
