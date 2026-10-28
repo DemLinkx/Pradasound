@@ -184,6 +184,8 @@ class QueueItem:
     owner_id: str
     yandex_session: str | None = None
     access_revision: int = 0
+    provider_session: str | None = None
+    canonical_url: str | None = None
 
 
 @dataclass
@@ -274,7 +276,8 @@ class ConnectionManager:
                 "tracks_queue": [item.track_id for item in lobby.queue_items],
                 "queue_items": [
                     {"id": item.id, "track_id": item.track_id, "owner_id": item.owner_id,
-                     "access_revision": item.access_revision}
+                     "access_revision": item.access_revision,
+                     **({"canonical_url": item.canonical_url} if item.canonical_url else {})}
                     for item in lobby.queue_items
                 ],
                 "track_titles": dict(lobby.track_titles),
@@ -422,7 +425,7 @@ async def lobby_ws(ws: WebSocket, lobby_id: str) -> None:
             if message.get("action") == "add_track":
                 track_id = message.get("track_id")
                 if not isinstance(track_id, str) or not re.fullmatch(
-                    r"(?:yandex_[0-9]{1,20}|[A-Za-z0-9_-]{11})", track_id
+                    r"(?:yandex_[0-9]{1,20}|sc_[0-9]{1,20}|vk_-?[0-9]{1,20}_[0-9]{1,20}|[A-Za-z0-9_-]{11})", track_id
                 ):
                     await manager.send(ws, {"type": "error", "error": "invalid_track_id"})
                     continue
@@ -438,9 +441,31 @@ async def lobby_ws(ws: WebSocket, lobby_id: str) -> None:
                 ):
                     await manager.send(ws, {"type": "error", "error": "yandex_session_required"})
                     continue
-                lobby.queue_items.append(QueueItem(uuid4().hex, track_id, owner_id, yandex_handle))
+                provider_handle = None
+                provider_title = None
+                canonical_url = None
+                if track_id.startswith(("sc_", "vk_")):
+                    from app.providers.music import validate_track
+
+                    provider_handle = message.get("provider_session")
+                    if not isinstance(provider_handle, str) or not re.fullmatch(
+                        r"[A-Za-z0-9_-]{32,128}", provider_handle
+                    ):
+                        await manager.send(ws, {"type": "error", "error": "Подключите музыкальный сервис заново"})
+                        continue
+                    provider = "soundcloud" if track_id.startswith("sc_") else "vk"
+                    try:
+                        metadata = validate_track(provider, provider_handle, track_id[3:])
+                    except HTTPException as exc:
+                        await manager.send(ws, {"type": "error", "error": str(exc.detail)})
+                        continue
+                    provider_title = f"{metadata['title']} — {metadata['artist']}"[:200]
+                    canonical_url = str(metadata["canonical_url"])
+                lobby.queue_items.append(QueueItem(uuid4().hex, track_id, owner_id, yandex_handle,
+                                                   provider_session=provider_handle,
+                                                   canonical_url=canonical_url))
                 lobby.queue_revision += 1
-                title = message.get("title")
+                title = provider_title or message.get("title")
                 if (
                     isinstance(title, str)
                     and 0 < len(title) <= 200
@@ -458,6 +483,31 @@ async def lobby_ws(ws: WebSocket, lobby_id: str) -> None:
                     if (item.owner_id == owner_id and item.track_id.startswith("yandex_")
                             and item.yandex_session != yandex_handle):
                         item.yandex_session = yandex_handle
+                        item.access_revision += 1
+                        changed = True
+                if not changed:
+                    continue
+            elif message.get("action") == "set_music_session":
+                from app.providers.music import validate_track
+
+                provider_name = message.get("provider")
+                provider_handle = message.get("provider_session")
+                if provider_name not in ("soundcloud", "vk") or not isinstance(provider_handle, str):
+                    await manager.send(ws, {"type": "error", "error": "invalid_music_session"})
+                    continue
+                prefix = "sc_" if provider_name == "soundcloud" else "vk_"
+                selected = [item for item in lobby.queue_items
+                            if item.owner_id == owner_id and item.track_id.startswith(prefix)]
+                try:
+                    for item in selected:
+                        validate_track(str(provider_name), provider_handle, item.track_id[3:])
+                except HTTPException as exc:
+                    await manager.send(ws, {"type": "error", "error": str(exc.detail)})
+                    continue
+                changed = False
+                for item in selected:
+                    if item.provider_session != provider_handle:
+                        item.provider_session = provider_handle
                         item.access_revision += 1
                         changed = True
                 if not changed:

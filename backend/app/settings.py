@@ -17,6 +17,12 @@ class Settings(BaseSettings):
     youtube_proxy_urls: list[str] = []
     youtube_cookies_file: Path | None = None
     youtube_api_key: str = ""
+    spotify_client_id: str = ""
+    spotify_client_secret: str = ""
+    soundcloud_client_id: str = ""
+    soundcloud_client_secret: str = ""
+    music_proxy_urls: list[str] = []
+    vk_audio_enabled: bool = False
     telegram_bot_token: str = ""
     telegram_webhook_secret: str = ""
     telegram_mini_app_url: str = ""

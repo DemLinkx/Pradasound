@@ -28,6 +28,7 @@ from app.api.healthcheck import router as healthcheck_router
 from app.api.lobby import LOBBIES
 from app.api.lobby import router as lobby_router
 from app.api.lobby import telegram_polling_loop
+from app.providers.music import router as music_router
 from app.settings import Settings
 
 settings = Settings()
@@ -57,6 +58,7 @@ app.add_middleware(
 
 app.include_router(healthcheck_router)
 app.include_router(lobby_router)
+app.include_router(music_router)
 
 @dataclass(frozen=True)
 class YouTubeAudio:

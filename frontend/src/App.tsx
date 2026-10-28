@@ -1,11 +1,19 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, FormEvent } from 'react';
+import type Hls from 'hls.js';
 import brandLogo from './assets/prada-sound-logo.png';
 
 type Session = { lobby_id: string; role: 'Main' | 'Member'; host_token?: string };
 type YandexTrack = { id: string; title: string; artist: string };
 type YandexLogin = { login_id: string; verification_url: string; user_code: string; interval: number; expires_in: number };
-type QueueItem = { id: string; track_id: string; owner_id: string; access_revision?: number };
+type QueueItem = { id: string; track_id: string; owner_id: string; access_revision?: number; canonical_url?: string };
+type MusicProvider = 'spotify' | 'soundcloud' | 'vk';
+type MusicTrack = { id: string; title: string; artist: string; canonical_url: string; playable: boolean; reason?: string };
+type MusicLibrary = { session: string; authenticated: boolean; tracks: MusicTrack[]; next_cursor: string | null; has_more: boolean };
+type MusicCapability = { oauth: boolean; public_import: boolean; experimental_token?: boolean; reason?: string };
+const MUSIC_LABELS: Record<MusicProvider, string> = { spotify: 'Spotify', soundcloud: 'SoundCloud', vk: 'VK Музыка' };
+const MUSIC_KEY = 'prada-sound-music';
+function sourceName(id?: string) { return id?.startsWith('yandex_') ? 'Яндекс Музыка' : id?.startsWith('sc_') ? 'SoundCloud' : id?.startsWith('vk_') ? 'VK Музыка' : 'YouTube'; }
 type Profile = { name: string; username: string | null; photo_url: string | null };
 type TelegramWebApp = { initData: string; ready: () => void; expand: () => void;
   openTelegramLink?: (url: string) => void; openLink?: (url: string) => void;
@@ -36,7 +44,7 @@ type YtApi = { Player: new (element: HTMLElement, options: {
 const STORAGE_KEY = 'prada-sound-lobby';
 const YANDEX_KEY = 'prada-sound-yandex';
 const VIDEO_ID = /^[A-Za-z0-9_-]{11}$/;
-const QUEUE_ID = /^(?:yandex_[0-9]{1,20}|[A-Za-z0-9_-]{11})$/;
+const QUEUE_ID = /^(?:yandex_[0-9]{1,20}|sc_[0-9]{1,20}|vk_-?[0-9]{1,20}_[0-9]{1,20}|[A-Za-z0-9_-]{11})$/;
 const guestTokens = new Map<string, string>();
 function memberToken(lobbyId: string) {
   const key = `prada-sound-member-${lobbyId}`;
@@ -228,6 +236,7 @@ const STYLES = `
   .share-card{padding:22px 24px}.share-card .sectionhead{margin-bottom:10px}.share-card .share{display:grid;grid-template-columns:minmax(0,1fr) 108px;gap:14px}.share-card .sharetext{min-width:0}.share-card .sharetext p{margin:4px 0 10px}.share-card .sharelink{font-size:12px;padding:10px}.share-card .roomid{margin:10px 0 0}.share-card .qr{width:108px;height:108px}
   .yandex-card{scroll-margin-top:24px}.likes{max-height:min(48vh,520px);overscroll-behavior:contain}.likes li{padding:10px 12px}.likes li:hover,.queue li:hover{border-color:#d39a6b4b}
   .sidecol.music-ready .yandex-card{order:-1}
+  .music-tabs{display:flex;gap:8px;flex-wrap:wrap;margin:18px 0}.music-tabs .button{flex:1;white-space:nowrap}.music-import .button{width:100%}.music-consent{display:flex;gap:10px;align-items:flex-start;font-size:13px;line-height:1.5;color:#e4e4e4;margin:18px 0}.music-consent input{width:17px;min-width:17px;margin-top:2px;accent-color:#f58b3b}.music-source{display:inline-block;font-size:11px;color:#efac74;margin-top:6px}
   .authbox{border-color:#ad744c77;background:linear-gradient(120deg,#9d633326,#ffffff05)}.code{border-color:#b6805970}
   .queue li.current{background:#c786581c;border-color:#bd825562}.queue .current .index{color:#e0a573}
   @media(max-width:1000px){.dashboard{grid-template-columns:minmax(0,1fr) minmax(300px,.8fr)}.deck-stage{grid-template-columns:minmax(0,1fr) 210px}.miniPlayer{min-height:205px}}
@@ -288,6 +297,24 @@ export default function App() {
   const [audioError, setAudioError] = useState('');
   const [fallbackId, setFallbackId] = useState('');
   const [yandexSearch, setYandexSearch] = useState('');
+  const [musicProvider, setMusicProvider] = useState<MusicProvider>('soundcloud');
+  const [musicCapabilities, setMusicCapabilities] = useState<Partial<Record<MusicProvider, MusicCapability>>>({});
+  const [musicLibraries, setMusicLibraries] = useState<Partial<Record<MusicProvider, MusicLibrary>>>({});
+  const [musicSessions, setMusicSessions] = useState<Partial<Record<MusicProvider, string>>>(() => {
+    try { const data = JSON.parse(sessionStorage.getItem(MUSIC_KEY) || '{}');
+      return Object.fromEntries((['spotify', 'soundcloud', 'vk'] as MusicProvider[]).filter((key) => typeof data[key] === 'string').map((key) => [key, data[key]]));
+    } catch { return {}; }
+  });
+  const [musicUrl, setMusicUrl] = useState('');
+  const [musicSearch, setMusicSearch] = useState('');
+  const [musicError, setMusicError] = useState('');
+  const [musicBusy, setMusicBusy] = useState(false);
+  const [spotifyConsent, setSpotifyConsent] = useState(false);
+  const [vkToken, setVkToken] = useState('');
+  const musicRequest = useRef<AbortController | null>(null);
+  const oauthOnce = useRef(false);
+  const oauthPopup = useRef<Window | null>(null);
+  const musicOperation = useRef(0);
   const [streamAttempt, setStreamAttempt] = useState(0);
   const [activeAudio, setActiveAudio] = useState(0);
   const activeAudioRef = useRef(0);
@@ -304,6 +331,7 @@ export default function App() {
   const loginTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const socket = useRef<WebSocket | null>(null);
   const audioPlayers = [useRef<HTMLAudioElement>(null), useRef<HTMLAudioElement>(null)];
+  const hlsPlayers = useRef<(Hls | null)[]>([null, null]);
   const preloaded = useRef<{ id: string; url: string; slot: number; key: string } | null>(null);
   const promoting = useRef<{ id: string; url: string; slot: number; revision: number } | null>(null);
   const fadeFrame = useRef<number | null>(null);
@@ -370,6 +398,99 @@ export default function App() {
   useEffect(() => {
     try { if (yandexSession) sessionStorage.setItem(YANDEX_KEY, yandexSession); else sessionStorage.removeItem(YANDEX_KEY); } catch {}
   }, [yandexSession]);
+
+  function acceptMusic(provider: MusicProvider, library: MusicLibrary, append = false) {
+    setMusicLibraries((previous) => ({ ...previous, [provider]: { ...library, tracks: append
+      ? Array.from(new Map([...(previous[provider]?.tracks || []), ...library.tracks].map((track) => [track.id, track])).values()) : library.tracks } }));
+    setMusicSessions((previous) => previous[provider] === library.session ? previous : { ...previous, [provider]: library.session });
+  }
+
+  async function musicJson(url: string, options: RequestInit = {}): Promise<MusicLibrary> {
+    const response = await fetch(url, options);
+    const data = await response.json();
+    if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : `Сервис не ответил (HTTP ${response.status}).`);
+    return data as MusicLibrary;
+  }
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void fetch('/api/music/providers', { signal: controller.signal }).then(async (response) => {
+      if (!response.ok) throw new Error();
+      const data = await response.json(); setMusicCapabilities(data.providers);
+    }).catch(() => { if (!controller.signal.aborted) setMusicError('Не удалось проверить подключения музыкальных сервисов. Обновите страницу.'); });
+    return () => controller.abort();
+  }, []);
+
+  useEffect(() => {
+    try { sessionStorage.setItem(MUSIC_KEY, JSON.stringify(musicSessions)); } catch {}
+    const controllers: AbortController[] = [];
+    for (const provider of ['spotify', 'soundcloud', 'vk'] as MusicProvider[]) {
+      const handle = musicSessions[provider];
+      if (!handle || musicLibraries[provider]) continue;
+      const controller = new AbortController(); controllers.push(controller);
+      void musicJson(`/api/music/${provider}/tracks`, { headers: { 'X-Music-Session': handle }, signal: controller.signal })
+        .then((library) => { if (!controller.signal.aborted) acceptMusic(provider, library); })
+        .catch((cause) => { if (!controller.signal.aborted) {
+          setMusicError(cause instanceof Error ? cause.message : 'Подключите сервис заново.');
+          setMusicSessions((previous) => { const next = { ...previous }; delete next[provider]; return next; });
+        } });
+    }
+    return () => controllers.forEach((controller) => controller.abort());
+  }, [musicSessions]);
+
+  useEffect(() => {
+    const ws = socket.current;
+    if (status !== 'connected' || ws?.readyState !== WebSocket.OPEN) return;
+    for (const provider of ['soundcloud', 'vk'] as MusicProvider[]) if (musicSessions[provider]) {
+      ws.send(JSON.stringify({ action: 'set_music_session', provider, provider_session: musicSessions[provider] }));
+    }
+  }, [musicSessions, status, session?.lobby_id]);
+
+  useEffect(() => {
+    const receive = (event: MessageEvent) => {
+      if (event.origin !== location.origin || event.source !== oauthPopup.current || !event.data || event.data.type !== 'prada-music-connected') return;
+      const provider = event.data.provider as MusicProvider;
+      if (provider !== 'spotify' && provider !== 'soundcloud') return;
+      if (event.data.error) setMusicError(String(event.data.error));
+      else if (event.data.library?.session && Array.isArray(event.data.library.tracks)) acceptMusic(provider, event.data.library as MusicLibrary);
+      setMusicBusy(false); oauthPopup.current = null;
+    };
+    window.addEventListener('message', receive);
+    return () => window.removeEventListener('message', receive);
+  }, []);
+
+  useEffect(() => {
+    const provider = location.pathname.match(/^\/oauth\/(spotify|soundcloud)$/)?.[1] as MusicProvider | undefined;
+    if (!provider || oauthOnce.current) return;
+    oauthOnce.current = true;
+    const params = new URLSearchParams(location.search);
+    let loginId = '';
+    try { loginId = sessionStorage.getItem(`prada-oauth-${provider}`) || ''; sessionStorage.removeItem(`prada-oauth-${provider}`); } catch {}
+    history.replaceState(null, '', '/');
+    setMusicProvider(provider); setMusicBusy(true);
+    void (async () => {
+      try {
+        if (params.get('error')) throw new Error('Вход отменён. Можно подключить сервис снова.');
+        if (!loginId || !params.get('code') || !params.get('state')) throw new Error('Попытка входа не найдена. Начните подключение снова.');
+        const library = await musicJson(`/api/music/${provider}/callback`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ login_id: loginId, code: params.get('code'), state: params.get('state') }) });
+        if (window.opener && !window.opener.closed) {
+          window.opener.postMessage({ type: 'prada-music-connected', provider, library }, location.origin); window.close();
+        } else acceptMusic(provider, library);
+      } catch (cause) {
+        const message = cause instanceof Error ? cause.message : 'Не удалось подключить сервис.'; setMusicError(message);
+        if (window.opener && !window.opener.closed) window.opener.postMessage({ type: 'prada-music-connected', provider, error: message }, location.origin);
+      } finally { setMusicBusy(false); }
+    })();
+  }, []);
+
+  useEffect(() => {
+    if (!musicBusy || !oauthPopup.current) return;
+    const timer = window.setInterval(() => { if (oauthPopup.current?.closed) { oauthPopup.current = null; setMusicBusy(false); } }, 700);
+    return () => window.clearInterval(timer);
+  }, [musicBusy]);
+
+  useEffect(() => () => { musicRequest.current?.abort(); }, []);
 
   useEffect(() => {
     const ws = socket.current;
@@ -492,23 +613,25 @@ export default function App() {
   const currentKey = `${playbackRevision}:${currentItem?.id}`;
   const nextItem = queueItems[1];
   const nextTrack = nextItem?.track_id;
-  const playbackCredential = currentTrack?.startsWith('yandex_')
+  const playbackCredential = currentTrack && !VIDEO_ID.test(currentTrack)
     ? `${currentItem.id}:${currentItem.access_revision || 0}` : session?.host_token;
-  const nextCredential = nextTrack?.startsWith('yandex_')
+  const nextCredential = nextTrack && !VIDEO_ID.test(nextTrack)
     ? `${nextItem.id}:${nextItem.access_revision || 0}` : session?.host_token;
   const audioCacheKey = (item: QueueItem) => `${item.id}:${item.access_revision || 0}`;
   async function resolveAudio(item: QueueItem, signal: AbortSignal): Promise<string> {
     const yandex = item.track_id.startsWith('yandex_');
+    const music = item.track_id.startsWith('sc_') || item.track_id.startsWith('vk_');
     if (!session?.host_token || !session.lobby_id) throw new Error('Нет доступа хоста к воспроизведению.');
     const response = await fetch(yandex ?
-      `/api/yandex/queue/${session.lobby_id}/${item.id}/stream` : `/api/youtube/audio/${item.track_id}`, {
-      method: yandex ? 'GET' : 'POST', signal,
-      headers: yandex ? { 'X-Host-Token': session.host_token } :
+      `/api/yandex/queue/${session.lobby_id}/${item.id}/stream` : music ?
+      `/api/music/queue/${session.lobby_id}/${item.id}/stream` : `/api/youtube/audio/${item.track_id}`, {
+      method: yandex || music ? 'GET' : 'POST', signal,
+      headers: yandex || music ? { 'X-Host-Token': session.host_token } :
         { 'X-Lobby-Id': session.lobby_id, 'X-Host-Token': session.host_token },
     });
     const data: { url?: string; detail?: string } = await response.json();
     if (!response.ok || !data.url) throw new Error(data.detail || `Аудиопоток недоступен (HTTP ${response.status}).`);
-    if (yandex ? new URL(data.url).protocol !== 'https:' :
+    if (music ? !(data.url.startsWith('/api/music/') || new URL(data.url).protocol === 'https:') : yandex ? new URL(data.url).protocol !== 'https:' :
         !/^\/api\/youtube\/audio\/file\/[A-Za-z0-9_-]+$/.test(data.url)) throw new Error('Некорректная аудиоссылка.');
     return data.url;
   }
@@ -524,6 +647,29 @@ export default function App() {
     preparedAudio.current.set(key, { promise, expiresAt: Date.now() + 5 * 60 * 1000 });
     return promise;
   }
+  function clearAudio(slot: number) {
+    hlsPlayers.current[slot]?.destroy(); hlsPlayers.current[slot] = null;
+    const player = audioPlayers[slot].current;
+    if (player) { player.pause(); player.removeAttribute('src'); player.load(); }
+  }
+  async function loadAudio(slot: number, url: string, signal: AbortSignal) {
+    hlsPlayers.current[slot]?.destroy(); hlsPlayers.current[slot] = null;
+    const player = audioPlayers[slot].current;
+    if (!player) return;
+    if (url.includes('.m3u8') && !player.canPlayType('application/vnd.apple.mpegurl')) {
+      const key = slotKeys.current[slot];
+      const Hls = (await import('hls.js')).default;
+      if (signal.aborted || slotKeys.current[slot] !== key) return;
+      if (!Hls.isSupported()) throw new Error('Этот браузер не поддерживает аудиопоток SoundCloud. Откройте сайт в современном браузере.');
+      const hls = new Hls({ enableWorker: false, backBufferLength: 5, maxBufferLength: 20, maxMaxBufferLength: 30, maxBufferSize: 4000000 });
+      hlsPlayers.current[slot] = hls;
+      hls.on(Hls.Events.ERROR, (_event, data) => { if (data.fatal && hlsPlayers.current[slot] === hls && slot === activeAudioRef.current) {
+        setAudioError('Аудиопоток SoundCloud прервался. Повторите загрузку или выберите следующий трек.'); setPlayingKey('');
+      } });
+      hls.loadSource(url); hls.attachMedia(player);
+    } else { player.src = url; player.load(); }
+  }
+  useEffect(() => () => hlsPlayers.current.forEach((hls) => hls?.destroy()), []);
   useEffect(() => { preparedAudio.current.clear(); }, [session?.lobby_id, session?.host_token]);
   useEffect(() => {
     const promotion = promoting.current;
@@ -538,7 +684,8 @@ export default function App() {
       const old = audioPlayers[1 - promotion.slot].current;
       const next = audioPlayers[promotion.slot].current;
       if (next) syncPlaybackTime(next);
-      if (old) { old.pause(); old.removeAttribute('src'); old.load(); old.volume = volumeRef.current; }
+      clearAudio(1 - promotion.slot);
+      if (old) old.volume = volumeRef.current;
       slotKeys.current[1 - promotion.slot] = '';
       return;
     }
@@ -550,9 +697,10 @@ export default function App() {
     setPlayingKey('');
     setPlaybackTime(0);
     setPlaybackDuration(0);
-    for (const ref of audioPlayers) {
-      const player = ref.current;
-      if (player) { player.pause(); player.removeAttribute('src'); player.load(); player.volume = volumeRef.current; }
+    for (const slot of [0, 1]) {
+      clearAudio(slot);
+      const player = audioPlayers[slot].current;
+      if (player) player.volume = volumeRef.current;
     }
     setAudioUrl('');
     setAudioError('');
@@ -566,12 +714,16 @@ export default function App() {
           const slot = activeAudioRef.current;
           const player = audioPlayers[slot].current;
           slotKeys.current[slot] = currentKey;
-          if (player) { player.src = url; player.volume = volumeRef.current; player.load(); void player.play().catch(() => setAudioError('Нажмите ▶, чтобы начать воспроизведение.')); }
+          if (player) {
+            await loadAudio(slot, url, controller.signal);
+            if (controller.signal.aborted) return;
+            player.volume = volumeRef.current; void player.play().catch(() => { if (!controller.signal.aborted) setAudioError('Нажмите ▶, чтобы начать воспроизведение.'); });
+          }
           setAudioUrl(url);
         }
       } catch (cause) {
         if (!controller.signal.aborted) {
-          if (currentItem.track_id.startsWith('yandex_')) {
+          if (!VIDEO_ID.test(currentItem.track_id)) {
             setAudioError(cause instanceof Error ? cause.message : 'Не удалось открыть аудио.');
             setPlayingKey('');
           } else setFallbackId(currentTrack);
@@ -593,7 +745,8 @@ export default function App() {
     const controller = new AbortController();
     const slot = 1 - activeAudioRef.current;
     const player = audioPlayers[slot].current;
-    if (player) { player.pause(); player.removeAttribute('src'); player.load(); player.volume = 0; }
+    clearAudio(slot);
+    if (player) player.volume = 0;
     slotKeys.current[slot] = '';
     preloaded.current = null;
     if (!nextItem) return;
@@ -601,10 +754,10 @@ export default function App() {
       try {
         const url = await prepareAudio(nextItem);
         if (!controller.signal.aborted && player) {
-          player.src = url;
-          player.load();
-          player.currentTime = 0;
           slotKeys.current[slot] = `${playbackRevision + 1}:${nextItem.id}`;
+          await loadAudio(slot, url, controller.signal);
+          if (controller.signal.aborted) return;
+          player.currentTime = 0;
           preloaded.current = { id: nextItem.id, url, slot, key: currentKey };
         }
       } catch {}
@@ -703,6 +856,88 @@ export default function App() {
     setSession({ lobby_id: id, role: 'Member' });
   }
 
+  async function musicOperationRequest(action: (signal: AbortSignal, provider: MusicProvider) => Promise<void>) {
+    if (musicBusy) return;
+    const id = ++musicOperation.current;
+    const controller = new AbortController(); musicRequest.current?.abort(); musicRequest.current = controller;
+    setMusicBusy(true); setMusicError('');
+    try { await action(controller.signal, musicProvider); }
+    catch (cause) { if (!controller.signal.aborted) setMusicError(cause instanceof Error ? cause.message : 'Не удалось загрузить музыку.'); }
+    finally { if (id === musicOperation.current) setMusicBusy(false); }
+  }
+
+  async function startMusicLogin() {
+    if (musicBusy) return;
+    const provider = musicProvider;
+    const popup = window.open('', `prada-${provider}-login`, 'popup,width=520,height=720');
+    oauthPopup.current = popup; setMusicBusy(true); setMusicError('');
+    try {
+      const response = await fetch(`/api/music/${provider}/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ redirect_uri: `${location.origin}/oauth/${provider}` }) });
+      const data: { login_id?: string; authorization_url?: string; detail?: string } = await response.json();
+      if (!response.ok || !data.login_id || !data.authorization_url) throw new Error(data.detail || 'Не удалось начать вход.');
+      const url = new URL(data.authorization_url);
+      if (url.protocol !== 'https:' || !['accounts.spotify.com', 'secure.soundcloud.com'].includes(url.hostname)) throw new Error('Некорректный адрес входа.');
+      sessionStorage.setItem(`prada-oauth-${provider}`, data.login_id);
+      if (popup && !popup.closed) { popup.sessionStorage.setItem(`prada-oauth-${provider}`, data.login_id); popup.location.href = url.href; }
+      else window.location.href = url.href;
+    } catch (cause) { popup?.close(); oauthPopup.current = null; setMusicBusy(false); setMusicError(cause instanceof Error ? cause.message : 'Не удалось открыть вход.'); }
+  }
+
+  function importMusic() {
+    void musicOperationRequest(async (signal, provider) => {
+      const library = await musicJson(`/api/music/${provider}/public`, { method: 'POST', signal,
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: musicUrl.trim() }) });
+      if (!signal.aborted) acceptMusic(provider, library);
+    });
+  }
+
+  function moreMusic() {
+    void musicOperationRequest(async (signal, provider) => {
+      const library = musicLibraries[provider]; if (!library?.has_more || !library.next_cursor) return;
+      const next = await musicJson(`/api/music/${provider}/tracks?cursor=${encodeURIComponent(library.next_cursor)}`, {
+        signal, headers: { 'X-Music-Session': library.session } });
+      if (!signal.aborted) acceptMusic(provider, next, true);
+    });
+  }
+
+  function connectVk() {
+    void musicOperationRequest(async (signal) => {
+      const library = await musicJson('/api/music/vk/login', { method: 'POST', signal,
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: vkToken.trim() }) });
+      setVkToken(''); if (!signal.aborted) acceptMusic('vk', library);
+    });
+  }
+
+  function enqueueMusic(track: MusicTrack) {
+    const provider = musicProvider; const library = musicLibraries[provider];
+    if (!library || !track.playable) return;
+    if (provider !== 'spotify') { enqueue(`${provider === 'soundcloud' ? 'sc' : 'vk'}_${track.id}`, `${track.title} — ${track.artist}`, library.session); return; }
+    if (!spotifyConsent) { setMusicError('Подтвердите воспроизведение найденной записи через YouTube.'); return; }
+    const lobbyId = session?.lobby_id;
+    void musicOperationRequest(async (signal) => {
+      const response = await fetch('/api/music/spotify/resolve', { method: 'POST', signal, headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session: library.session, track_id: track.id }) });
+      const data: { track_id?: string; title?: string; matched_title?: string; detail?: string } = await response.json();
+      if (!response.ok || !data.track_id || !VIDEO_ID.test(data.track_id)) throw new Error(data.detail || 'Запись на YouTube не найдена.');
+      if (!signal.aborted && lastRoom.current === lobbyId && socket.current?.readyState === WebSocket.OPEN) {
+        socket.current.send(JSON.stringify({ action: 'add_track', track_id: data.track_id, title: (data.title || `${track.title} — ${track.artist}`).slice(0, 200) }));
+        setCopyNotice({ message: `Добавлена запись YouTube: ${data.matched_title || track.title}`, id: ++copyNoticeId.current });
+      }
+    });
+  }
+
+  async function disconnectMusic() {
+    const provider = musicProvider; const library = musicLibraries[provider];
+    if (!library || musicBusy) return;
+    void musicOperationRequest(async (signal) => {
+      const response = await fetch(`/api/music/${provider}/disconnect`, { method: 'POST', signal, headers: { 'X-Music-Session': library.session } });
+      if (!response.ok) throw new Error('Не удалось отключить сервис. Повторите попытку.');
+      setMusicSessions((previous) => { const next = { ...previous }; delete next[provider]; return next; });
+      setMusicLibraries((previous) => { const next = { ...previous }; delete next[provider]; return next; });
+    });
+  }
+
   async function addTrack(event: FormEvent) {
     event.preventDefault();
     if (loadingMetadata) return;
@@ -735,7 +970,7 @@ export default function App() {
     catch { notify(fallback() ? copied : 'Не удалось скопировать. Выделите и скопируйте вручную.'); }
   }
 
-  function enqueue(id: string, title?: string) {
+  function enqueue(id: string, title?: string, providerSession?: string) {
     const ws = socket.current;
     if (status !== 'connected' || ws?.readyState !== WebSocket.OPEN) return false;
     if (id.startsWith('yandex_') && !yandexSession) {
@@ -745,6 +980,7 @@ export default function App() {
     setError('');
     try { ws.send(JSON.stringify({ action: 'add_track', track_id: id,
       ...(title ? { title: title.slice(0, 200) } : {}),
+      ...(providerSession ? { provider_session: providerSession } : {}),
       ...(id.startsWith('yandex_') ? { yandex_session: yandexSession } : {}) })); return true; }
     catch { setError('Не удалось отправить трек. Подключитесь снова.'); return false; }
   }
@@ -944,7 +1180,10 @@ export default function App() {
     return query ? yandexTracks.filter((track) => `${track.title} ${track.artist}`.toLocaleLowerCase('ru').includes(query)) : yandexTracks;
   }, [yandexTracks, yandexSearch]);
   const isYandex = currentTrack?.startsWith('yandex_');
-  const nowTitle = currentTrack ? trackTitles[currentTrack] || (isYandex ? 'Трек Яндекс Музыки' : `YouTube · ${currentTrack}`) : 'Музыка начинается здесь';
+  const nowTitle = currentTrack ? trackTitles[currentTrack] || `${sourceName(currentTrack)} · ${currentTrack}` : 'Музыка начинается здесь';
+  const musicLibrary = musicLibraries[musicProvider];
+  const musicCapability = musicCapabilities[musicProvider];
+  const filteredMusic = (musicLibrary?.tracks || []).filter((track) => `${track.title} ${track.artist}`.toLocaleLowerCase('ru').includes(musicSearch.trim().toLocaleLowerCase('ru')));
   return <main className={`app ${telegramInitData ? 'telegram-app' : ''}`}><style>{STYLES}</style><div className="backdrop" aria-hidden="true" /><div className="shell">
     <header className="topbar"><div className="brand"><span className="brandmark"><img src={brandLogo} width="54" height="54" alt="" /></span> PRADA SOUND</div>
       {me ? <span className="profile-chip"><Avatar profile={me} size={32} /><span>{profileLabel(me)}</span></span> :
@@ -982,17 +1221,18 @@ export default function App() {
         </section>
         {session.role === 'Member' && <section className="card cardpad hero">
           <div className="heroText"><span className="eyebrow">{currentTrack ? 'СЕЙЧАС ИГРАЕТ' : 'ГОТОВО К СТАРТУ'}</span>
-            <h2>{nowTitle}</h2><p className="muted small">{currentTrack ? (isYandex ? 'Яндекс Музыка' : 'YouTube') : 'Добавьте первый трек в очередь'}</p>
+            <h2>{nowTitle}</h2><p className="muted small">{currentTrack ? sourceName(currentTrack) : 'Добавьте первый трек в очередь'}</p>
             {currentTrack && <div className="bars" aria-hidden="true">{Array.from({ length: 20 }, (_, i) => <i key={i} />)}</div>}
           </div>
-          <div className="art" aria-hidden="true">{currentTrack && !isYandex ? <img src={`https://i.ytimg.com/vi/${currentTrack}/hqdefault.jpg`} alt="" /> : <span className="record" />}</div>
+          <div className="art" aria-hidden="true">{currentTrack && VIDEO_ID.test(currentTrack) ? <img src={`https://i.ytimg.com/vi/${currentTrack}/hqdefault.jpg`} alt="" /> : <span className="record" />}</div>
         </section>}
         {session.role === 'Main' && <section className="card deck" aria-label="Плеер хоста">
           <div className="deck-stage">
             <div className="deck-stage-copy"><div className="deck-status"><span className="eyebrow">{currentTrack ? 'СЕЙЧАС ИГРАЕТ' : 'ПЛЕЕР ХОСТА'}</span>
               <span className={`deck-onair ${playingKey === currentKey && currentTrack ? 'playing' : ''}`}><i />{playingKey === currentKey && currentTrack ? 'В ЭФИРЕ' : 'ОЖИДАНИЕ'}</span></div>
               <h2>{currentTrack ? nowTitle : 'Очередь пока пуста'}</h2>
-              <p>{currentTrack ? (isYandex ? 'Яндекс Музыка' : 'YouTube') : 'Добавьте первый трек, чтобы начать.'}</p>
+              <p>{currentTrack ? sourceName(currentTrack) : 'Добавьте первый трек, чтобы начать.'}</p>
+              {currentItem?.canonical_url && <a className="music-source" href={currentItem.canonical_url} target="_blank" rel="noopener noreferrer">Открыть в {sourceName(currentTrack)} ↗</a>}
               {currentTrack ? <div className="bars" aria-hidden="true">{Array.from({ length: 20 }, (_, i) => <i key={i} />)}</div> :
                 <button className="button tiny stage-add" onClick={() => document.getElementById('add-track')?.scrollIntoView({ behavior: 'smooth', block: 'center' })}>Добавить трек ↓</button>}
             </div>
@@ -1053,7 +1293,7 @@ export default function App() {
               else { fading.current = false; skipTrack(); }
             } }}
             onError={() => { if (slot === activeAudioRef.current && slotKeys.current[slot] === currentKey) {
-              if (currentTrack && !currentTrack.startsWith('yandex_')) {
+              if (currentTrack && VIDEO_ID.test(currentTrack)) {
                 if (currentItem && audioRetryKey.current !== currentKey && (audioPlayers[slot].current?.currentTime || 0) < 1) {
                   audioRetryKey.current = currentKey;
                   preparedAudio.current.delete(audioCacheKey(currentItem));
@@ -1062,7 +1302,7 @@ export default function App() {
               }
               else {
                 if (currentItem) preparedAudio.current.delete(audioCacheKey(currentItem));
-                setAudioError('Не удалось воспроизвести трек Яндекс Музыки. Повторите загрузку или пропустите его вручную.');
+                setAudioError(`Не удалось воспроизвести трек ${sourceName(currentTrack)}. Повторите загрузку или выберите следующий трек.`);
                 setAudioUrl('');
                 setPlayingKey('');
               }
@@ -1093,7 +1333,7 @@ export default function App() {
             onDragEnd={() => { draggingItem.current = ''; }}>
             <span className="index">{index === 0 ? '♫' : String(index + 1).padStart(2, '0')}</span>
             <div className="trackmeta"><strong>{trackTitles[item.track_id] || item.track_id}</strong>
-              <small>{item.track_id.startsWith('yandex_') ? 'Яндекс Музыка' : 'YouTube'}{index === 0 ? ' · Сейчас играет' : ''}</small>
+              <small>{sourceName(item.track_id)}{index === 0 ? ' · Сейчас играет' : ''}</small>
               <span className="added-by"><Avatar profile={profiles[item.owner_id]} size={23} />
                 Добавил{item.owner_id === ownerId ? '(а) вы' : `(а) ${profileLabel(profiles[item.owner_id])}`}</span></div>
             {session.role === 'Main' && index > 0 && <span className="queueControls">
@@ -1142,6 +1382,42 @@ export default function App() {
             <button className="button tiny" disabled={status !== 'connected'} onClick={() => enqueue(`yandex_${track.id}`, `${track.title} — ${track.artist}`)}>+ В очередь</button>
           </li>)}</ul>}
           {yandexConnected && hasMoreLikes && <button className="button tiny" onClick={() => void showMoreLikes()} disabled={loadingLikes}>Показать ещё</button>}
+        </section>
+        <section className="card cardpad music-card" id="music-services"><span className="eyebrow">БОЛЬШЕ МУЗЫКИ</span>
+          <h3>Другие библиотеки</h3>
+          <div className="music-tabs" role="tablist" aria-label="Музыкальный сервис">{(['soundcloud', 'spotify', 'vk'] as MusicProvider[]).map((provider) =>
+            <button key={provider} role="tab" aria-selected={musicProvider === provider} className={`button tiny ${musicProvider === provider ? 'primary' : ''}`} disabled={musicBusy}
+              onClick={() => { setMusicProvider(provider); setMusicSearch(''); setMusicUrl(''); setMusicError(''); }}>{MUSIC_LABELS[provider]}</button>)}</div>
+          <div role="tabpanel" aria-label={MUSIC_LABELS[musicProvider]}>
+            {musicProvider === 'soundcloud' && <p className="muted small">Импортируйте публичные лайки по ссылке на профиль — бесплатного аккаунта достаточно. Приватная библиотека доступна через вход, когда подключено приложение SoundCloud.</p>}
+            {musicProvider === 'spotify' && <p className="muted small">Spotify используется для импорта названий. Для воспроизведения подбираем запись на YouTube; она может отличаться от оригинала.</p>}
+            {musicProvider === 'vk' && <p className="muted small">Вход через VK ID сам по себе не открывает музыкальную библиотеку. Для подключения нужен отдельный доступ к VK Audio API.</p>}
+            {musicCapability?.oauth && <button className="button primary" disabled={musicBusy} onClick={() => void startMusicLogin()}>Подключить {MUSIC_LABELS[musicProvider]} ↗</button>}
+            {musicCapability && !musicCapability.oauth && <p className="muted small">{musicCapability.reason}</p>}
+            {musicCapability?.public_import && <form onSubmit={(event) => { event.preventDefault(); importMusic(); }} className="music-import">
+              <label className="field">{musicProvider === 'soundcloud' ? 'Ссылка на публичные лайки' : 'Ссылка на публичный плейлист'}
+                <input type="url" required value={musicUrl} onChange={(event) => setMusicUrl(event.target.value)} placeholder={musicProvider === 'soundcloud' ? 'https://soundcloud.com/ваш-профиль/likes' : 'https://open.spotify.com/playlist/…'} aria-label={`Ссылка для импорта ${MUSIC_LABELS[musicProvider]}`} />
+              </label><button className="button primary" disabled={musicBusy || !musicUrl.trim()}>Загрузить треки</button>
+            </form>}
+            {musicProvider === 'vk' && musicCapability?.experimental_token && <form onSubmit={(event) => { event.preventDefault(); connectVk(); }}>
+              <label className="field">Токен приложения с доступом к музыке<input type="password" autoComplete="off" value={vkToken} onChange={(event) => setVkToken(event.target.value)} required /></label>
+              <button className="button primary" disabled={musicBusy || !vkToken.trim()}>Проверить доступ и загрузить музыку</button>
+            </form>}
+            {musicProvider === 'spotify' && <label className="music-consent"><input type="checkbox" checked={spotifyConsent} onChange={(event) => setSpotifyConsent(event.target.checked)} />Разрешаю подбирать и воспроизводить записи через YouTube</label>}
+            {musicBusy && <p className="muted small" role="status">Загружаем музыку…</p>}
+            {musicError && <p className="notice" role="alert">{musicError}</p>}
+            {musicLibrary && <>
+              <div className="row" style={{ justifyContent: 'space-between', flexWrap: 'wrap' }}><p className="muted small">{musicLibrary.authenticated ? 'Библиотека подключена' : 'Публичный импорт'} · {musicLibrary.tracks.length} треков</p>
+                <button className="button tiny" disabled={musicBusy} onClick={() => void disconnectMusic()}>Отключить</button></div>
+              <label className="field">Поиск среди загруженных треков<input value={musicSearch} onChange={(event) => setMusicSearch(event.target.value)} placeholder="Название или исполнитель" aria-label={`Поиск ${MUSIC_LABELS[musicProvider]}`} /></label>
+              <ul className="likes">{filteredMusic.map((track) => <li key={track.id}><div className="trackmeta"><strong>{track.title}</strong><small>{track.artist || MUSIC_LABELS[musicProvider]}</small>
+                {track.canonical_url && <a className="music-source" href={track.canonical_url} target="_blank" rel="noopener noreferrer">{MUSIC_LABELS[musicProvider]} ↗</a>}
+                {!track.playable && <small>{track.reason || 'Полный трек недоступен'}</small>}</div>
+                <button className="button tiny" disabled={status !== 'connected' || musicBusy || !track.playable || musicProvider === 'spotify' && !spotifyConsent} onClick={() => enqueueMusic(track)}>+ В очередь</button></li>)}</ul>
+              {filteredMusic.length === 0 && <p className="muted small">Треки не найдены.</p>}
+              {musicLibrary.has_more && <button className="button tiny" disabled={musicBusy} onClick={moreMusic}>Показать ещё</button>}
+            </>}
+          </div>
         </section>
       </div></div>
     </>}
