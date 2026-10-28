@@ -5,10 +5,14 @@ import { test } from 'node:test';
 import { Script } from 'node:vm';
 
 const source = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
-const start = source.indexOf('function yandexPage(');
-assert.ok(start >= 0);
-const end = source.indexOf('\n}\n', start) + 3;
-const parse = new Script(`${stripTypeScriptTypes(source.slice(start, end))}; yandexPage`).runInNewContext();
+function sourceFunction(name) {
+  const start = source.indexOf(`function ${name}(`);
+  assert.ok(start >= 0);
+  const end = source.indexOf('\n}\n', start) + 3;
+  return new Script(`${stripTypeScriptTypes(source.slice(start, end))}; ${name}`).runInNewContext({ URL, URLSearchParams });
+}
+const parse = sourceFunction('yandexPage');
+const vkToken = sourceFunction('vkAccessToken');
 
 test('one unusual or malformed entry does not reject all liked tracks', () => {
   const page = parse({ tracks: [
@@ -40,4 +44,13 @@ test('unsupported rows stay disabled and cannot disguise themselves as playable'
 
 test('invalid envelope still produces a retryable library error', () => {
   assert.throws(() => parse({ authenticated: true, tracks: null }), /Обновить лайки/);
+});
+
+test('VK final OAuth URL sends only its token, not the whole URL', () => {
+  const token = 'vk1.a.' + 'a'.repeat(40);
+  assert.equal(vkToken(`https://oauth.vk.com/blank.html#access_token=${token}&expires_in=86400&user_id=123`), token);
+  assert.equal(vkToken(`  ${token}  `), token);
+  assert.throws(() => vkToken(`https://evil.example/blank.html#access_token=${token}`));
+  assert.throws(() => vkToken(`https://evil.example@oauth.vk.com/blank.html#access_token=${token}`));
+  assert.throws(() => vkToken('https://oauth.vk.com/blank.html#error=access_denied'));
 });

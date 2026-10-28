@@ -19,10 +19,14 @@ class Settings(BaseSettings):
     youtube_api_key: str = ""
     spotify_client_id: str = ""
     spotify_client_secret: str = ""
+    spotify_device_enabled: bool = True
+    spotify_device_client_id: str = "65b708073fc0480ea92a077233ca87bd"
     soundcloud_client_id: str = ""
     soundcloud_client_secret: str = ""
     music_proxy_urls: list[str] = []
     vk_audio_enabled: bool = False
+    vk_public_client_id: str = "2685278"
+    vk_audio_user_agent: str = ""
     telegram_bot_token: str = ""
     telegram_webhook_secret: str = ""
     telegram_mini_app_url: str = ""

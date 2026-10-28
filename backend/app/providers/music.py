@@ -6,6 +6,8 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import logging
+import math
 import re
 import secrets
 from collections.abc import AsyncIterator
@@ -29,9 +31,12 @@ LOGIN_TTL = 600
 MAX_SESSIONS = 512
 MAX_TRACKS = 500
 PAGE_SIZE = 50
+MAX_DEVICE_LOGINS = 100
+SPOTIFY_DEVICE_ID = "65b708073fc0480ea92a077233ca87bd"
 SPOTIFY_API = "https://api.spotify.com/v1"
 SC_API = "https://api.soundcloud.com"
 VK_API = "https://api.vk.ru/method"
+VK_PUBLIC_CLIENT_ID = "2685278"
 ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
 
@@ -58,9 +63,27 @@ class MusicSession:
     last_resolve: float = 0
     secret_tokens: dict[str, str] = field(default_factory=dict)
     page_urls: dict[str, str] = field(default_factory=dict)
+    client_id: str = ""
+    proxy: str | None = None
+
+
+@dataclass
+class PendingDevice:
+    provider: str
+    device_code: str
+    client_id: str
+    browser_nonce: str
+    expires: float
+    interval: int
+    next_poll: float
+    proxy: str | None
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    session_handle: str = ""
+    library: dict[str, Any] | None = None
 
 
 PENDING: dict[str, PendingLogin] = {}
+PENDING_DEVICES: dict[str, PendingDevice] = {}
 SESSIONS: dict[str, MusicSession] = {}
 RESOLVE_CACHE: dict[str, dict[str, str]] = {}
 ROUTE_FAILURES: dict[str | None, float] = {}
@@ -72,6 +95,7 @@ class AudioTicket:
     proxy: str | None
     expires: float
     children: dict[str, str] = field(default_factory=dict)
+    provider: str = "soundcloud"
 
 
 TICKETS: dict[str, AudioTicket] = {}
@@ -120,6 +144,30 @@ def _credentials(provider: str) -> tuple[str, str]:
     if provider == "soundcloud":
         return str(_value("soundcloud_client_id")), str(_value("soundcloud_client_secret"))
     return "", ""
+
+
+def _vk_headers() -> dict[str, str]:
+    agent = str(_value("vk_audio_user_agent", "")).strip()
+    if not agent:
+        return {}
+    if len(agent) > 256 or "\r" in agent or "\n" in agent:
+        raise HTTPException(503, "Некорректная настройка VK")
+    return {"User-Agent": agent}
+
+
+def _vk_authorization_url() -> str | None:
+    client_id = str(_value("vk_public_client_id", VK_PUBLIC_CLIENT_ID))
+    if not re.fullmatch(r"\d{1,16}", client_id):
+        return None
+    return "https://oauth.vk.com/authorize?" + urlencode(
+        {
+            "client_id": client_id,
+            "scope": "8",
+            "redirect_uri": "https://oauth.vk.com/blank.html",
+            "display": "page",
+            "response_type": "token",
+        }
+    )
 
 
 def _proxy() -> str | None:
@@ -181,6 +229,9 @@ def _clean() -> None:
     for key, pending in list(PENDING.items()):
         if pending.expires < now:
             del PENDING[key]
+    for key, device_pending in list(PENDING_DEVICES.items()):
+        if device_pending.expires < now:
+            del PENDING_DEVICES[key]
     for key, session in list(SESSIONS.items()):
         if session.lifetime < now:
             del SESSIONS[key]
@@ -231,8 +282,13 @@ async def _refresh(session: MusicSession) -> None:
     async with session.lock:
         if session.expires > monotonic() + 60:
             return
-        client_id, client_secret = _credentials(session.provider)
-        if not session.refresh_token or not client_id or not client_secret:
+        configured_id, client_secret = _credentials(session.provider)
+        client_id = session.client_id or configured_id
+        if (
+            not session.refresh_token
+            or not client_id
+            or (not client_secret and not session.client_id)
+        ):
             raise HTTPException(401, "Подключите музыкальный аккаунт снова")
         url = (
             "https://accounts.spotify.com/api/token"
@@ -243,9 +299,10 @@ async def _refresh(session: MusicSession) -> None:
             "grant_type": "refresh_token",
             "refresh_token": session.refresh_token,
             "client_id": client_id,
-            "client_secret": client_secret,
         }
-        async with _client(_proxy()) as client:
+        if client_secret and not session.client_id:
+            data["client_secret"] = client_secret
+        async with _client(session.proxy if session.client_id else _proxy()) as client:
             body = await _call(client, "POST", url, data=data)
         token = body.get("access_token")
         if not isinstance(token, str) or not token:
@@ -256,13 +313,27 @@ async def _refresh(session: MusicSession) -> None:
         session.expires = monotonic() + int(body.get("expires_in", 3600))
 
 
-def _store(provider: str, access: str, refresh: str = "", expires_in: int = 3600) -> str:
+def _store(
+    provider: str,
+    access: str,
+    refresh: str = "",
+    expires_in: int = 3600,
+    *,
+    client_id: str = "",
+    proxy: str | None = None,
+) -> str:
     _clean()
     if len(SESSIONS) >= MAX_SESSIONS:
         raise HTTPException(503, "Слишком много музыкальных подключений")
     handle = secrets.token_urlsafe(32)
     SESSIONS[handle] = MusicSession(
-        provider, access, refresh, monotonic() + expires_in, monotonic() + SESSION_TTL
+        provider,
+        access,
+        refresh,
+        monotonic() + expires_in,
+        monotonic() + SESSION_TTL,
+        client_id=client_id,
+        proxy=proxy,
     )
     return handle
 
@@ -352,20 +423,22 @@ def _safe_provider_url(url: str, provider: str) -> bool:
         return False
 
 
-def _safe_media_url(url: str) -> bool:
+def _safe_media_url(url: str, provider: str = "soundcloud") -> bool:
     try:
         parsed = urlparse(url)
         host = parsed.hostname or ""
+        domains = (
+            ("vkcdn.ru", "vkuseraudio.net", "userapi.com", "vk-cdn.net")
+            if provider == "vk"
+            else ("sndcdn.com", "soundcloud.cloud", "soundcloud.com")
+        )
         return (
             parsed.scheme == "https"
             and not parsed.username
             and not parsed.password
             and parsed.port is None
             and len(url) <= 4096
-            and any(
-                host == name or host.endswith("." + name)
-                for name in ("sndcdn.com", "soundcloud.cloud", "soundcloud.com")
-            )
+            and any(host == name or host.endswith("." + name) for name in domains)
         )
     except ValueError:
         return False
@@ -435,6 +508,7 @@ async def providers() -> dict[str, Any]:
     result = {}
     for provider in ("spotify", "soundcloud", "vk"):
         client_id, client_secret = _credentials(provider)
+        device_enabled = provider == "spotify" and bool(_value("spotify_device_enabled", True))
         enabled = (
             bool(client_id and client_secret)
             if provider != "vk"
@@ -443,7 +517,9 @@ async def providers() -> dict[str, Any]:
         reason = (
             "Готово к подключению"
             if enabled
-            else "Нужны ключи приложения Spotify"
+            else "Подключение Spotify по коду устройства"
+            if device_enabled
+            else "Подключение Spotify выключено"
             if provider == "spotify"
             else "Нужны ключи приложения SoundCloud"
             if provider == "soundcloud"
@@ -451,11 +527,219 @@ async def providers() -> dict[str, Any]:
         )
         result[provider] = {
             "oauth": enabled and provider != "vk",
+            "device_login": device_enabled,
             "public_import": provider == "soundcloud",
             "experimental_token": enabled and provider == "vk",
             "reason": reason,
         }
+        if provider == "vk" and enabled:
+            result[provider]["token_authorization_url"] = _vk_authorization_url()
+            result[provider]["token_application"] = "Kate Mobile"
+            result[provider]["reason"] = (
+                "Экспериментальный вход через Kate Mobile; доступ к аудио проверяется после входа"
+            )
     return {"providers": result}
+
+
+def _spotify_verification_url(value: object) -> str | None:
+    if not isinstance(value, str) or len(value) > 1024:
+        return None
+    try:
+        parsed = urlparse(value)
+        if (
+            parsed.scheme == "https"
+            and parsed.hostname in {"spotify.com", "www.spotify.com", "accounts.spotify.com"}
+            and parsed.port is None
+            and not parsed.username
+            and not parsed.password
+            and not parsed.fragment
+            and parsed.path.rstrip("/") == "/pair"
+        ):
+            return value
+    except ValueError:
+        pass
+    return None
+
+
+@router.post("/{provider}/device")
+async def start_device(provider: str, request: Request, response: Response) -> dict[str, Any]:
+    _check_origin(request)
+    if provider != "spotify":
+        raise HTTPException(404, "Подключение по коду для этого сервиса недоступно")
+    if not _value("spotify_device_enabled", True):
+        raise HTTPException(503, "Подключение Spotify по коду выключено")
+    _clean()
+    if len(PENDING_DEVICES) >= MAX_DEVICE_LOGINS:
+        raise HTTPException(503, "Слишком много ожидающих подключений")
+    client_id = str(_value("spotify_device_client_id", SPOTIFY_DEVICE_ID))
+    if not re.fullmatch(r"[A-Za-z0-9]{16,64}", client_id):
+        raise HTTPException(503, "Подключение Spotify не настроено")
+    selected_proxy = _proxy()
+    async with _client(selected_proxy) as client:
+        body = await _call(
+            client,
+            "POST",
+            "https://accounts.spotify.com/oauth2/device/authorize",
+            data={"client_id": client_id, "scope": "user-library-read"},
+        )
+    device_code = body.get("device_code")
+    user_code = body.get("user_code")
+    verification_url = _spotify_verification_url(
+        body.get("verification_uri_complete")
+    ) or _spotify_verification_url(body.get("verification_uri"))
+    try:
+        expires_in = int(str(body.get("expires_in", "")))
+        interval = max(5, min(60, int(body.get("interval", 5))))
+    except (ValueError, TypeError):
+        raise HTTPException(502, "Некорректный ответ Spotify") from None
+    if (
+        not isinstance(device_code, str)
+        or not 1 <= len(device_code) <= 2048
+        or not isinstance(user_code, str)
+        or not 1 <= len(user_code) <= 100
+        or not verification_url
+        or expires_in <= 0
+    ):
+        raise HTTPException(502, "Некорректный ответ Spotify")
+    expires_in = min(expires_in, LOGIN_TTL)
+    login_id = secrets.token_urlsafe(32)
+    browser_nonce = secrets.token_urlsafe(32)
+    now = monotonic()
+    PENDING_DEVICES[login_id] = PendingDevice(
+        "spotify",
+        device_code,
+        client_id,
+        browser_nonce,
+        now + expires_in,
+        interval,
+        now + interval,
+        selected_proxy,
+    )
+    response.set_cookie(
+        "music_device",
+        browser_nonce,
+        max_age=expires_in,
+        secure=request.url.scheme == "https",
+        httponly=True,
+        samesite="lax",
+        path="/api/music",
+    )
+    return {
+        "login_id": login_id,
+        "verification_url": verification_url,
+        "user_code": user_code,
+        "interval": interval,
+        "expires_in": expires_in,
+    }
+
+
+@router.get("/{provider}/device/{login_id}")
+async def poll_device(provider: str, login_id: str, request: Request) -> dict[str, Any]:
+    _check_origin(request)
+    if provider != "spotify" or not re.fullmatch(r"[A-Za-z0-9_-]{32,128}", login_id):
+        raise HTTPException(404, "Подключение не найдено")
+    pending = PENDING_DEVICES.get(login_id)
+    if pending is None or pending.provider != provider:
+        raise HTTPException(404, "Подключение не найдено")
+    browser_nonce = request.cookies.get("music_device", "")
+    if not browser_nonce or not hmac.compare_digest(pending.browser_nonce, browser_nonce):
+        raise HTTPException(404, "Подключение не найдено")
+    if pending.expires <= monotonic():
+        PENDING_DEVICES.pop(login_id, None)
+        raise HTTPException(410, "Код Spotify истёк; начните подключение снова")
+    if pending.library is not None:
+        return {"status": "authorized", **pending.library}
+    async with pending.lock:
+        if pending.library is not None:
+            return {"status": "authorized", **pending.library}
+        now = monotonic()
+        if now < pending.next_poll:
+            return {"status": "pending", "retry_after": max(1, math.ceil(pending.next_poll - now))}
+        pending.next_poll = now + pending.interval
+        try:
+            async with _client(pending.proxy) as client:
+                response = await client.post(
+                    "https://accounts.spotify.com/api/token",
+                    data={
+                        "client_id": pending.client_id,
+                        "device_code": pending.device_code,
+                        "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+                    },
+                )
+        except httpx.HTTPError:
+            raise HTTPException(502, "Spotify временно недоступен") from None
+        if len(response.content) > 65536:
+            raise HTTPException(502, "Некорректный ответ Spotify")
+        try:
+            body = response.json()
+        except ValueError:
+            raise HTTPException(502, "Некорректный ответ Spotify") from None
+        if not isinstance(body, dict):
+            raise HTTPException(502, "Некорректный ответ Spotify")
+        if response.status_code == 429:
+            retry = response.headers.get("Retry-After", str(pending.interval))
+            raise HTTPException(
+                429, "Лимит Spotify; попробуйте позже", headers={"Retry-After": retry}
+            )
+        if response.status_code == 400:
+            error = body.get("error")
+            if error == "authorization_pending":
+                return {"status": "pending", "retry_after": pending.interval}
+            if error == "slow_down":
+                pending.interval = min(60, pending.interval + 5)
+                pending.next_poll = monotonic() + pending.interval
+                return {"status": "pending", "retry_after": pending.interval}
+            if isinstance(error, str) and error in {"access_denied", "authorization_denied"}:
+                PENDING_DEVICES.pop(login_id, None)
+                raise HTTPException(403, "Подключение Spotify отклонено")
+            if error == "expired_token":
+                PENDING_DEVICES.pop(login_id, None)
+                raise HTTPException(410, "Код Spotify истёк; начните подключение снова")
+            raise HTTPException(502, "Spotify отклонил подключение")
+        if response.status_code != 200:
+            raise HTTPException(502, "Spotify отклонил подключение")
+        access = body.get("access_token")
+        refresh = body.get("refresh_token")
+        if not isinstance(access, str) or not access:
+            raise HTTPException(502, "Spotify не выдал токен доступа")
+        if not isinstance(refresh, str):
+            refresh = ""
+        try:
+            token_lifetime = max(60, min(86400, int(body.get("expires_in", 3600))))
+        except (TypeError, ValueError):
+            token_lifetime = 3600
+        handle = _store(
+            "spotify",
+            access,
+            refresh,
+            token_lifetime,
+            client_id=pending.client_id,
+            proxy=pending.proxy,
+        )
+        pending.session_handle = handle
+        try:
+            library = await tracks("spotify", request=request, x_music_session=handle)
+            library_status = 200
+        except HTTPException as exc:
+            library_status = exc.status_code
+            library = {
+                "session": handle,
+                "authenticated": False,
+                "tracks": [],
+                "has_more": False,
+                "next_cursor": None,
+                "library_error": (
+                    f"Доступ подтверждён, но библиотека Spotify недоступна: {exc.detail}"
+                ),
+            }
+        logging.getLogger("uvicorn.error").info(
+            "music_device_authorized provider=spotify library_access=%s tracks=%d http_status=%d",
+            library_status == 200,
+            len(library["tracks"]),
+            library_status,
+        )
+        pending.library = library
+        return {"status": "authorized", **library}
 
 
 @router.post("/vk/login")
@@ -472,10 +756,18 @@ async def vk_login(body: TokenBody, request: Request) -> dict[str, Any]:
             "POST",
             f"{VK_API}/audio.get",
             data={"access_token": token, "v": "5.199", "count": 1},
+            headers=_vk_headers(),
         )
     _vk_error(data)
+    payload = data.get("response")
+    if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
+        raise HTTPException(502, "VK не подтвердил доступ к аудиобиблиотеке")
     handle = _store("vk", token, expires_in=SESSION_TTL)
-    return await tracks("vk", request=request, x_music_session=handle)
+    library = await tracks("vk", request=request, x_music_session=handle)
+    logging.getLogger("uvicorn.error").info(
+        "music_account_authorized provider=vk tracks=%d", len(library["tracks"])
+    )
+    return library
 
 
 @router.post("/{provider}/login")
@@ -588,6 +880,17 @@ async def callback(
 def _vk_error(body: dict[str, Any]) -> None:
     if "error" in body:
         code = body["error"].get("error_code") if isinstance(body["error"], dict) else None
+        logging.getLogger("uvicorn.error").warning(
+            "music_provider_error provider=vk code=%s", code if isinstance(code, int) else "unknown"
+        )
+        if code == 5:
+            raise HTTPException(401, "Токен VK истёк или недействителен; подключитесь снова")
+        if code in {6, 9}:
+            raise HTTPException(429, "Лимит VK; попробуйте позже", headers={"Retry-After": "10"})
+        if code == 14:
+            raise HTTPException(403, "VK требует подтверждение; получите новый токен в VK")
+        if code == 17:
+            raise HTTPException(403, "VK требует подтверждение входа на своей странице")
         if code in {15, 200, 201}:
             raise HTTPException(403, "VK ограничил доступ к аудио для этого приложения")
         raise HTTPException(403, "VK не предоставил доступ к музыкальной библиотеке")
@@ -613,7 +916,7 @@ async def tracks(
     if offset < 0 or offset >= MAX_TRACKS or str(offset) != (cursor or "0"):
         raise HTTPException(400, "Некорректная страница")
     if provider == "spotify":
-        async with _client(_proxy()) as client:
+        async with _client(session.proxy if session.client_id else _proxy()) as client:
             body = await _call(
                 client,
                 "GET",
@@ -662,11 +965,17 @@ async def tracks(
                     "count": PAGE_SIZE,
                     "offset": offset,
                 },
+                headers=_vk_headers(),
             )
         _vk_error(body)
         payload = body.get("response", {})
-        raw_items = payload.get("items", []) if isinstance(payload, dict) else []
-        more = offset + PAGE_SIZE < int(payload.get("count", 0))
+        if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
+            raise HTTPException(502, "VK не подтвердил доступ к аудиобиблиотеке")
+        raw_items = payload["items"]
+        try:
+            more = offset + PAGE_SIZE < int(payload.get("count", 0))
+        except (TypeError, ValueError):
+            raise HTTPException(502, "Некорректный ответ VK") from None
     if not isinstance(raw_items, list):
         raise HTTPException(502, "Некорректный ответ музыкального сервиса")
     normalized = []
@@ -836,12 +1145,12 @@ def _queue_item(lobby_id: str, item_id: str, host_token: str) -> tuple[str, str,
     return provider, handle, raw_id
 
 
-def _new_ticket(source: str, proxy: str | None) -> str:
+def _new_ticket(source: str, proxy: str | None, provider: str = "soundcloud") -> str:
     _clean()
     if len(TICKETS) >= 64:
         TICKETS.pop(next(iter(TICKETS)))
     ticket_id = secrets.token_urlsafe(24)
-    TICKETS[ticket_id] = AudioTicket(source, proxy, monotonic() + 7200)
+    TICKETS[ticket_id] = AudioTicket(source, proxy, monotonic() + 7200, provider=provider)
     return ticket_id
 
 
@@ -860,12 +1169,20 @@ async def queue_stream(
                 "POST",
                 f"{VK_API}/audio.getById",
                 data={"access_token": session.access_token, "v": "5.199", "audios": raw_id},
+                headers=_vk_headers(),
             )
         _vk_error(body)
         records = body.get("response")
-        url = records[0].get("url") if isinstance(records, list) and records else None
-        if not isinstance(url, str) or not _safe_vk_audio_url(url):
+        url = (
+            records[0].get("url")
+            if (isinstance(records, list) and records and isinstance(records[0], dict))
+            else None
+        )
+        if not isinstance(url, str) or not _safe_media_url(url, "vk"):
             raise HTTPException(422, "VK не предоставил поддерживаемый полный аудиопоток")
+        if ".m3u8" in urlparse(url).path.lower():
+            ticket_id = _new_ticket(url, None, provider="vk")
+            return {"url": f"/api/music/hls/{ticket_id}/index.m3u8", "format": "hls"}
         return {"url": url, "format": "audio"}
     if session.access_token:
         await _refresh(session)
@@ -918,30 +1235,10 @@ async def queue_stream(
     raise HTTPException(422, "SoundCloud не предоставил полный поддерживаемый аудиопоток")
 
 
-def _safe_vk_audio_url(url: str) -> bool:
-    try:
-        parsed = urlparse(url)
-        host = parsed.hostname or ""
-        return (
-            parsed.scheme == "https"
-            and not parsed.username
-            and not parsed.password
-            and parsed.port is None
-            and len(url) <= 4096
-            and ".m3u8" not in parsed.path
-            and any(
-                host == name or host.endswith("." + name)
-                for name in ("vkcdn.ru", "vkuseraudio.net", "userapi.com", "vk-cdn.net")
-            )
-        )
-    except ValueError:
-        return False
-
-
 def _child(ticket_id: str, ticket: AudioTicket, target: str) -> str:
     if len(ticket.children) >= 4096:
         raise HTTPException(502, "Слишком длинный плейлист SoundCloud")
-    if not _safe_media_url(target):
+    if not _safe_media_url(target, ticket.provider):
         raise HTTPException(502, "Недопустимый адрес аудиофайла")
     child_id = secrets.token_urlsafe(12)
     suffix = "m3u8" if ".m3u8" in urlparse(target).path else "bin"
@@ -968,9 +1265,11 @@ def _rewrite_manifest(ticket_id: str, ticket: AudioTicket, source: str, content:
     return "\n".join(output) + "\n"
 
 
-async def _open_media(client: httpx.AsyncClient, url: str, range_header: str) -> httpx.Response:
+async def _open_media(
+    client: httpx.AsyncClient, url: str, range_header: str, provider: str = "soundcloud"
+) -> httpx.Response:
     for _ in range(4):
-        if not _safe_media_url(url):
+        if not _safe_media_url(url, provider):
             raise HTTPException(502, "Недопустимый адрес аудиофайла")
         try:
             request = client.build_request(
@@ -1020,7 +1319,7 @@ async def hls_resource(ticket_id: str, resource: str, range: str = Header(defaul
         raise HTTPException(400, "Некорректный Range")
     client = _client(ticket.proxy)
     try:
-        response = await _open_media(client, source, range)
+        response = await _open_media(client, source, range, ticket.provider)
     except BaseException:
         await client.aclose()
         raise

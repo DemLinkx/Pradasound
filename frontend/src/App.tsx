@@ -37,11 +37,23 @@ type YandexLogin = { login_id: string; verification_url: string; user_code: stri
 type QueueItem = { id: string; track_id: string; owner_id: string; access_revision?: number; canonical_url?: string };
 type MusicProvider = 'spotify' | 'soundcloud' | 'vk';
 type MusicTrack = { id: string; title: string; artist: string; canonical_url: string; playable: boolean; reason?: string };
-type MusicLibrary = { session: string; authenticated: boolean; tracks: MusicTrack[]; next_cursor: string | null; has_more: boolean };
-type MusicCapability = { oauth: boolean; public_import: boolean; experimental_token?: boolean; reason?: string };
+type MusicLibrary = { session: string; authenticated: boolean; tracks: MusicTrack[]; next_cursor: string | null; has_more: boolean; library_error?: string };
+type MusicCapability = { oauth: boolean; public_import: boolean; device_login?: boolean; experimental_token?: boolean; token_authorization_url?: string; token_application?: string; reason?: string };
+type MusicDeviceLogin = YandexLogin & { provider: MusicProvider };
 const MUSIC_LABELS: Record<MusicProvider, string> = { spotify: 'Spotify', soundcloud: 'SoundCloud', vk: 'VK Музыка' };
 const MUSIC_KEY = 'prada-sound-music';
 function sourceName(id?: string) { return id?.startsWith('yandex_') ? 'Яндекс Музыка' : id?.startsWith('sc_') ? 'SoundCloud' : id?.startsWith('vk_') ? 'VK Музыка' : 'YouTube'; }
+function vkAccessToken(input: string) {
+  let token = input.trim();
+  if (/^https?:\/\//i.test(token)) {
+    const url = new URL(token);
+    if (url.protocol !== 'https:' || !['oauth.vk.com', 'oauth.vk.ru'].includes(url.hostname) || url.pathname !== '/blank.html' || url.username || url.password)
+      throw new Error('Вставьте итоговую ссылку страницы VK с access_token в адресе.');
+    token = new URLSearchParams(url.hash.slice(1)).get('access_token') || '';
+  }
+  if (!/^[A-Za-z0-9._-]{20,2048}$/.test(token)) throw new Error('В ссылке нет токена VK. Завершите подтверждение доступа и скопируйте итоговый адрес.');
+  return token;
+}
 type Profile = { name: string; username: string | null; photo_url: string | null };
 type TelegramWebApp = { initData: string; ready: () => void; expand: () => void;
   openTelegramLink?: (url: string) => void; openLink?: (url: string) => void;
@@ -338,6 +350,8 @@ export default function App() {
   const [musicSearch, setMusicSearch] = useState('');
   const [musicError, setMusicError] = useState('');
   const [musicBusy, setMusicBusy] = useState(false);
+  const [musicDeviceLogin, setMusicDeviceLogin] = useState<MusicDeviceLogin | null>(null);
+  const musicDeviceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [spotifyConsent, setSpotifyConsent] = useState(false);
   const [vkToken, setVkToken] = useState('');
   const musicRequest = useRef<AbortController | null>(null);
@@ -520,7 +534,7 @@ export default function App() {
     return () => window.clearInterval(timer);
   }, [musicBusy]);
 
-  useEffect(() => () => { musicRequest.current?.abort(); }, []);
+  useEffect(() => () => { musicRequest.current?.abort(); if (musicDeviceTimer.current) clearTimeout(musicDeviceTimer.current); }, []);
 
   useEffect(() => {
     const ws = socket.current;
@@ -691,11 +705,11 @@ export default function App() {
       const key = slotKeys.current[slot];
       const Hls = (await import('hls.js')).default;
       if (signal.aborted || slotKeys.current[slot] !== key) return;
-      if (!Hls.isSupported()) throw new Error('Этот браузер не поддерживает аудиопоток SoundCloud. Откройте сайт в современном браузере.');
+      if (!Hls.isSupported()) throw new Error('Этот браузер не поддерживает HLS-аудиопоток. Откройте сайт в современном браузере.');
       const hls = new Hls({ enableWorker: false, backBufferLength: 5, maxBufferLength: 20, maxMaxBufferLength: 30, maxBufferSize: 4000000 });
       hlsPlayers.current[slot] = hls;
       hls.on(Hls.Events.ERROR, (_event, data) => { if (data.fatal && hlsPlayers.current[slot] === hls && slot === activeAudioRef.current) {
-        setAudioError('Аудиопоток SoundCloud прервался. Повторите загрузку или выберите следующий трек.'); setPlayingKey('');
+        setAudioError('Аудиопоток прервался. Повторите загрузку или выберите следующий трек.'); setPlayingKey('');
       } });
       hls.loadSource(url); hls.attachMedia(player);
     } else { player.src = url; player.load(); }
@@ -897,6 +911,66 @@ export default function App() {
     finally { if (id === musicOperation.current) setMusicBusy(false); }
   }
 
+  function cancelMusicDevice() {
+    musicRequest.current?.abort();
+    if (musicDeviceTimer.current) clearTimeout(musicDeviceTimer.current);
+    setMusicDeviceLogin(null); setMusicBusy(false);
+  }
+
+  async function checkMusicDevice(login: MusicDeviceLogin, controller: AbortController, failures = 0) {
+    if (controller.signal.aborted) return;
+    try {
+      const response = await fetch(`/api/music/${login.provider}/device/${encodeURIComponent(login.login_id)}`, { signal: controller.signal });
+      const data: Partial<MusicLibrary> & { status?: string; retry_after?: number; detail?: string } = await response.json();
+      if (!response.ok) throw Object.assign(new Error(data.detail || 'Не удалось проверить подтверждение входа.'), { status: response.status });
+      if (controller.signal.aborted) return;
+      if (data.status === 'pending') {
+        musicDeviceTimer.current = setTimeout(() => void checkMusicDevice(login, controller), Math.max(5, Math.min(60, data.retry_after || login.interval)) * 1000);
+        return;
+      }
+      if (data.status !== 'authorized' || typeof data.session !== 'string' || !/^[A-Za-z0-9_-]{32,128}$/.test(data.session) || !Array.isArray(data.tracks))
+        throw new Error('Сервис не подтвердил доступ. Начните подключение заново.');
+      acceptMusic(login.provider, { session: data.session, authenticated: data.authenticated === true, tracks: data.tracks,
+        has_more: data.has_more === true, next_cursor: typeof data.next_cursor === 'string' ? data.next_cursor : null,
+        library_error: data.library_error });
+      setMusicError(data.library_error || ''); setMusicDeviceLogin(null); setMusicBusy(false);
+    } catch (cause) {
+      if (controller.signal.aborted) return;
+      const status = cause && typeof cause === 'object' && 'status' in cause ? Number(cause.status) : 0;
+      if (failures < 2 && (!status || status >= 500 || status === 429)) {
+        musicDeviceTimer.current = setTimeout(() => void checkMusicDevice(login, controller, failures + 1), 10000);
+        return;
+      }
+      setMusicError(cause instanceof Error ? cause.message : 'Не удалось завершить вход.');
+      setMusicDeviceLogin(null); setMusicBusy(false);
+    }
+  }
+
+  async function startMusicDevice() {
+    if (musicBusy) return;
+    const provider = musicProvider;
+    const controller = new AbortController(); musicRequest.current?.abort(); musicRequest.current = controller;
+    if (musicDeviceTimer.current) clearTimeout(musicDeviceTimer.current);
+    setMusicBusy(true); setMusicError(''); setMusicDeviceLogin(null);
+    try {
+      const response = await fetch(`/api/music/${provider}/device`, { method: 'POST', signal: controller.signal });
+      const data: Partial<YandexLogin> & { detail?: string } = await response.json();
+      if (!response.ok) throw new Error(data.detail || 'Сервис не выдал код входа.');
+      if (typeof data.login_id !== 'string' || typeof data.user_code !== 'string' || typeof data.verification_url !== 'string')
+        throw new Error('Сервис не выдал корректный код входа.');
+      const url = new URL(data.verification_url);
+      if (url.protocol !== 'https:' || !['spotify.com', 'www.spotify.com', 'accounts.spotify.com'].includes(url.hostname))
+        throw new Error('Некорректная страница подтверждения Spotify.');
+      if (controller.signal.aborted) return;
+      const login: MusicDeviceLogin = { provider, login_id: data.login_id, user_code: data.user_code, verification_url: url.href,
+        interval: Math.max(5, data.interval || 5), expires_in: data.expires_in || 600 };
+      setMusicDeviceLogin(login);
+      musicDeviceTimer.current = setTimeout(() => void checkMusicDevice(login, controller), login.interval * 1000);
+    } catch (cause) {
+      if (!controller.signal.aborted) { setMusicError(cause instanceof Error ? cause.message : 'Не удалось получить код входа.'); setMusicBusy(false); }
+    }
+  }
+
   async function startMusicLogin() {
     if (musicBusy) return;
     const provider = musicProvider;
@@ -936,14 +1010,14 @@ export default function App() {
     void musicOperationRequest(async (signal, provider) => {
       const handle = musicSessions[provider]; if (!handle) return;
       const library = await musicJson(`/api/music/${provider}/tracks`, { signal, headers: { 'X-Music-Session': handle } });
-      if (!signal.aborted) acceptMusic(provider, library);
+      if (!signal.aborted) { acceptMusic(provider, library); setMusicError(library.library_error || ''); }
     });
   }
 
   function connectVk() {
     void musicOperationRequest(async (signal) => {
       const library = await musicJson('/api/music/vk/login', { method: 'POST', signal,
-        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: vkToken.trim() }) });
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: vkAccessToken(vkToken) }) });
       setVkToken(''); if (!signal.aborted) acceptMusic('vk', library);
     });
   }
@@ -1444,8 +1518,9 @@ export default function App() {
               onClick={() => { setMusicProvider(provider); setMusicSearch(''); setMusicUrl(''); setMusicError(''); }}>{MUSIC_LABELS[provider]}</button>)}</div>
           <div role="tabpanel" aria-label={MUSIC_LABELS[musicProvider]}>
             {musicProvider === 'soundcloud' && <p className="muted small">Импортируйте публичные лайки по ссылке на профиль — бесплатного аккаунта достаточно. Приватная библиотека доступна через вход, когда подключено приложение SoundCloud.</p>}
-            {musicProvider === 'spotify' && <p className="muted small">Spotify используется для импорта названий. Для воспроизведения подбираем запись на YouTube; она может отличаться от оригинала.</p>}
-            {musicProvider === 'vk' && <p className="muted small">Вход через VK ID сам по себе не открывает музыкальную библиотеку. Для подключения нужен отдельный доступ к VK Audio API.</p>}
+            {musicProvider === 'spotify' && <p className="muted small">Подключите аккаунт кодом на сайте Spotify. Импортируем лайки, а для воспроизведения подбираем запись на YouTube; она может отличаться от оригинала.</p>}
+            {musicProvider === 'vk' && <p className="muted small">Экспериментальное подключение своей музыки через публичный OAuth. После подтверждения VK проверим, разрешён ли доступ к аудиозаписям.</p>}
+            {musicCapability?.device_login && <button className="button primary" disabled={musicBusy} onClick={() => void startMusicDevice()}>Подключить {MUSIC_LABELS[musicProvider]} по коду →</button>}
             {musicCapability?.oauth && <button className="button primary" disabled={musicBusy} onClick={() => void startMusicLogin()}>Подключить {MUSIC_LABELS[musicProvider]} ↗</button>}
             {musicCapability && !musicCapability.oauth && <p className="muted small">{musicCapability.reason}</p>}
             {musicCapability?.public_import && <form onSubmit={(event) => { event.preventDefault(); importMusic(); }} className="music-import">
@@ -1453,17 +1528,34 @@ export default function App() {
                 <input type="url" required value={musicUrl} onChange={(event) => setMusicUrl(event.target.value)} placeholder={musicProvider === 'soundcloud' ? 'https://soundcloud.com/ваш-профиль/likes' : 'https://open.spotify.com/playlist/…'} aria-label={`Ссылка для импорта ${MUSIC_LABELS[musicProvider]}`} />
               </label><button className="button primary" disabled={musicBusy || !musicUrl.trim()}>Загрузить треки</button>
             </form>}
-            {musicProvider === 'vk' && musicCapability?.experimental_token && <form onSubmit={(event) => { event.preventDefault(); connectVk(); }}>
-              <label className="field">Токен приложения с доступом к музыке<input type="password" autoComplete="off" value={vkToken} onChange={(event) => setVkToken(event.target.value)} required /></label>
-              <button className="button primary" disabled={musicBusy || !vkToken.trim()}>Проверить доступ и загрузить музыку</button>
-            </form>}
+            {musicDeviceLogin && <div className="authbox" style={{ marginTop: 16 }}><span className="eyebrow">ПОДТВЕРДИТЕ ВХОД {MUSIC_LABELS[musicDeviceLogin.provider]}</span>
+              <p className="muted small">Откройте страницу Spotify, войдите в свой аккаунт и подтвердите код. Библиотека загрузится после проверки доступа.</p>
+              <div className="row" style={{ flexWrap: 'wrap' }}><code className="code mono">{musicDeviceLogin.user_code}</code>
+                <button className="button tiny" onClick={() => void copy(musicDeviceLogin.user_code, 'Код')}>Копировать код</button></div>
+              <div className="row" style={{ flexWrap: 'wrap', marginTop: 14 }}><a className="button primary linklike" href={musicDeviceLogin.verification_url} target="_blank" rel="noopener noreferrer"
+                onClick={(event) => { if (telegramInitData && telegram?.openLink) { event.preventDefault(); telegram.openLink(musicDeviceLogin.verification_url); } }}>Открыть Spotify ↗</a>
+                <button className="button tiny" onClick={cancelMusicDevice}>Отменить</button></div>
+            </div>}
+            {musicProvider === 'vk' && musicCapability?.experimental_token && <>
+              {musicCapability.token_authorization_url && <div className="authbox" style={{ marginTop: 14 }}>
+                <p className="muted small">VK покажет приложение «{musicCapability.token_application || 'Kate Mobile'}». Запрашиваем только доступ к музыке. Пароль вводится исключительно на сайте VK.</p>
+                <a className="button primary linklike" href={musicCapability.token_authorization_url} target="_blank" rel="noopener noreferrer"
+                  onClick={(event) => { if (telegramInitData && telegram?.openLink) { event.preventDefault(); telegram.openLink(musicCapability.token_authorization_url!); } }}>Подтвердить доступ в VK ↗</a>
+                <p className="muted small">После подтверждения скопируйте итоговый адрес страницы с access_token и вставьте ниже. В этом способе VK не возвращает код обратно на наш сайт автоматически.</p>
+              </div>}
+              <form onSubmit={(event) => { event.preventDefault(); connectVk(); }}>
+                <label className="field">Итоговая ссылка VK или токен музыки<input type="password" autoComplete="off" spellCheck={false} value={vkToken} onChange={(event) => setVkToken(event.target.value)} required /></label>
+                <button className="button primary" disabled={musicBusy || !vkToken.trim()}>Подключить и загрузить музыку</button>
+              </form>
+            </>}
             {musicProvider === 'spotify' && <label className="music-consent"><input type="checkbox" checked={spotifyConsent} onChange={(event) => setSpotifyConsent(event.target.checked)} />Разрешаю подбирать и воспроизводить записи через YouTube</label>}
-            {musicBusy && <p className="muted small" role="status">Загружаем музыку…</p>}
+            {musicBusy && <p className="muted small" role="status">{musicDeviceLogin ? 'Ждём подтверждения Spotify…' : 'Загружаем музыку…'}</p>}
             {musicError && <p className="notice" role="alert">{musicError}</p>}
             {!musicLibrary && musicSessions[musicProvider] && <button className="button tiny" disabled={musicBusy} onClick={restoreMusic}>Восстановить подключение</button>}
             {musicLibrary && <>
-              <div className="row" style={{ justifyContent: 'space-between', flexWrap: 'wrap' }}><p className="muted small">{musicLibrary.authenticated ? 'Библиотека подключена' : 'Публичный импорт'} · {musicLibrary.tracks.length} треков</p>
-                <button className="button tiny" disabled={musicBusy} onClick={() => void disconnectMusic()}>Отключить</button></div>
+              <div className="row" style={{ justifyContent: 'space-between', flexWrap: 'wrap' }}><p className="muted small">{musicLibrary.library_error ? 'Вход подтверждён, библиотека недоступна' : musicLibrary.authenticated ? 'Библиотека подключена' : 'Публичный импорт'} · {musicLibrary.tracks.length} треков</p>
+                <span className="row" style={{ flexWrap: 'wrap' }}><button className="button tiny" disabled={musicBusy} onClick={restoreMusic}>Обновить библиотеку</button>
+                <button className="button tiny" disabled={musicBusy} onClick={() => void disconnectMusic()}>Отключить</button></span></div>
               <label className="field">Поиск среди загруженных треков<input value={musicSearch} onChange={(event) => setMusicSearch(event.target.value)} placeholder="Название или исполнитель" aria-label={`Поиск ${MUSIC_LABELS[musicProvider]}`} /></label>
               <ul className="likes">{filteredMusic.map((track) => <li key={track.id}><div className="trackmeta"><strong>{track.title}</strong><small>{track.artist || MUSIC_LABELS[musicProvider]}</small>
                 {track.canonical_url && <a className="music-source" href={track.canonical_url} target="_blank" rel="noopener noreferrer">{MUSIC_LABELS[musicProvider]} ↗</a>}
