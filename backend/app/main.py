@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import re
 import secrets
 import time
@@ -410,11 +411,22 @@ async def check_yandex_login(login_id: str) -> dict[str, object]:
         if token is None:
             return {"status": "pending", "retry_after": pending.interval}
         DEVICE_LOGINS.pop(login_id, None)
-        client = await run_in_threadpool(lambda: Client(token.access_token).init(timeout=10))
-        tracks = await run_in_threadpool(liked_page, client, 0)
+        try:
+            client = await run_in_threadpool(lambda: Client(token.access_token).init(timeout=10))
+        except UnauthorizedError:
+            raise HTTPException(status_code=401, detail="Яндекс не подтвердил доступ к аккаунту") from None
+        except YandexMusicError:
+            raise HTTPException(status_code=502, detail="Не удалось открыть аккаунт Яндекса. Повторите вход") from None
         handle = secrets.token_urlsafe(32)
         lifetime = min(token.expires_in or 14400, 14400)
         YANDEX_SESSIONS[handle] = YandexSession(client, monotonic() + lifetime)
+        library_error = ""
+        try:
+            tracks = await run_in_threadpool(liked_page, client, 0)
+        except (YandexMusicError, ValueError, TypeError, AttributeError):
+            tracks = YandexTracksResponse(tracks=[])
+            library_error = "Аккаунт подключён, но список лайков не загрузился. Нажмите «Обновить лайки»"
+            logging.getLogger("uvicorn.error").warning("Yandex authorization succeeded; likes unavailable")
         return {
             "status": "authorized",
             "authenticated": tracks.authenticated,
@@ -422,6 +434,8 @@ async def check_yandex_login(login_id: str) -> dict[str, object]:
             "has_more": tracks.has_more,
             "next_offset": tracks.next_offset,
             "session": handle,
+            "library_error": library_error,
+            "unsupported_count": tracks.unsupported_count,
         }
 
 
@@ -429,11 +443,20 @@ class YandexToken(BaseModel):
     token: SecretStr = Field(min_length=1, max_length=8192)
 
 
+class YandexTrackResponse(BaseModel):
+    id: str
+    title: str
+    artist: str
+    playable: bool = True
+    reason: str = ""
+
+
 class YandexTracksResponse(BaseModel):
     authenticated: bool = True
-    tracks: list[dict[str, str]]
+    tracks: list[YandexTrackResponse]
     has_more: bool = False
     next_offset: int = 0
+    unsupported_count: int = 0
 
 
 def liked_page(client: Any, offset: int) -> YandexTracksResponse:
@@ -441,18 +464,41 @@ def liked_page(client: Any, offset: int) -> YandexTracksResponse:
     liked = likes.tracks if likes and likes.tracks else []
     selected = liked[offset : offset + 50]
     tracks = client.tracks([track.track_id for track in selected], timeout=10) if selected else []
+    normalized = []
+    missing = 0
+    for track in tracks or []:
+        if not track:
+            missing += 1
+            continue
+        raw_id = str(getattr(track, "id", "") or "")
+        if not raw_id or len(raw_id) > 128:
+            missing += 1
+            continue
+        catalog_id = re.fullmatch(r"([0-9]{1,20})(?::[0-9]{1,20})?", raw_id)
+        playable = catalog_id is not None
+        metadata = getattr(track, "meta_data", None)
+        title = getattr(track, "title", None) or getattr(metadata, "title", None)
+        artists = [getattr(artist, "name", None) for artist in getattr(track, "artists", None) or []]
+        artist = ", ".join(name.strip() for name in artists if isinstance(name, str) and name.strip())
+        fallback_artist = getattr(metadata, "artist", None)
+        normalized.append(YandexTrackResponse(
+            id=catalog_id[1] if catalog_id else raw_id,
+            title=title.strip() if isinstance(title, str) and title.strip() else "Без названия",
+            artist=artist or (fallback_artist.strip() if isinstance(fallback_artist, str) and fallback_artist.strip() else "Неизвестный исполнитель"),
+            playable=playable,
+            reason="" if playable else "Этот тип записи Яндекса пока не поддерживается плеером",
+        ))
+    unsupported = sum(not track.playable for track in normalized) + missing
+    if unsupported:
+        logging.getLogger("uvicorn.error").warning(
+            "Yandex likes normalized: loaded=%d unsupported=%d missing=%d",
+            len(normalized), unsupported - missing, missing,
+        )
     return YandexTracksResponse(
-        tracks=[
-            {
-                "id": str(track.id),
-                "title": track.title or "Без названия",
-                "artist": ", ".join(artist.name for artist in track.artists or []),
-            }
-            for track in tracks or []
-            if track
-        ],
+        tracks=normalized,
         has_more=len(liked) > offset + 50,
         next_offset=offset + len(selected),
+        unsupported_count=unsupported,
     )
 
 

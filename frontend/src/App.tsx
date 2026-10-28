@@ -4,7 +4,35 @@ import type Hls from 'hls.js';
 import brandLogo from './assets/prada-sound-logo.png';
 
 type Session = { lobby_id: string; role: 'Main' | 'Member'; host_token?: string };
-type YandexTrack = { id: string; title: string; artist: string };
+type YandexTrack = { id: string; title: string; artist: string; playable: boolean; reason: string };
+function yandexPage(value: unknown) {
+  if (!value || typeof value !== 'object' || !('tracks' in value) || !Array.isArray(value.tracks))
+    throw new Error('Аккаунт подключён, но список лайков не загрузился. Нажмите «Обновить лайки».');
+  const tracks: YandexTrack[] = [];
+  let unsupported = 0;
+  const seen = new Set<string>();
+  for (const row of value.tracks) {
+    if (!row || typeof row !== 'object') { unsupported++; continue; }
+    const raw = typeof row.id === 'string' ? row.id.trim() : Number.isSafeInteger(row.id) ? String(row.id) : '';
+    if (!raw || raw.length > 128) { unsupported++; continue; }
+    const catalog = raw.match(/^([0-9]{1,20})(?::[0-9]{1,20})?$/);
+    const id = catalog?.[1] || raw;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const playable = Boolean(catalog) && row.playable !== false;
+    if (!playable) unsupported++;
+    tracks.push({ id, playable,
+      title: typeof row.title === 'string' && row.title.trim() ? row.title.trim() : 'Без названия',
+      artist: typeof row.artist === 'string' && row.artist.trim() ? row.artist.trim() : 'Неизвестный исполнитель',
+      reason: playable ? '' : typeof row.reason === 'string' && row.reason ? row.reason : 'Этот тип записи Яндекса пока не поддерживается плеером',
+    });
+  }
+  return { tracks, has_more: 'has_more' in value && value.has_more === true,
+    next_offset: 'next_offset' in value && Number.isSafeInteger(value.next_offset) && Number(value.next_offset) >= 0 ? Number(value.next_offset) : value.tracks.length,
+    unsupported_count: Math.max(unsupported, 'unsupported_count' in value && Number.isSafeInteger(value.unsupported_count) ? Number(value.unsupported_count) : 0),
+    library_error: 'library_error' in value && typeof value.library_error === 'string' ? value.library_error : '',
+  };
+}
 type YandexLogin = { login_id: string; verification_url: string; user_code: string; interval: number; expires_in: number };
 type QueueItem = { id: string; track_id: string; owner_id: string; access_revision?: number; canonical_url?: string };
 type MusicProvider = 'spotify' | 'soundcloud' | 'vk';
@@ -292,6 +320,7 @@ export default function App() {
   const [yandexConnected, setYandexConnected] = useState(false);
   const [yandexSession, setYandexSession] = useState(() => { try { return sessionStorage.getItem(YANDEX_KEY) || ''; } catch { return ''; } });
   const [hasMoreLikes, setHasMoreLikes] = useState(false);
+  const [yandexUnsupported, setYandexUnsupported] = useState(0);
   const [nextLikesOffset, setNextLikesOffset] = useState(0);
   const [audioUrl, setAudioUrl] = useState('');
   const [audioError, setAudioError] = useState('');
@@ -505,12 +534,13 @@ export default function App() {
     setLoadingLikes(true);
     void fetch('/api/yandex/tracks?offset=0', { headers: { 'X-Yandex-Session': yandexSession }, signal: controller.signal })
       .then(async (response) => { if (!response.ok) throw new Error(String(response.status)); return response.json(); })
-      .then((data: { tracks: YandexTrack[]; has_more: boolean; next_offset: number }) => {
+      .then((data: unknown) => {
         if (controller.signal.aborted) return;
-        setYandexTracks(data.tracks); setHasMoreLikes(data.has_more); setNextLikesOffset(data.next_offset); setYandexConnected(true);
+        applyYandexPage(data);
       }).catch((cause) => {
         if (controller.signal.aborted) return;
         if (cause instanceof Error && cause.message === '401') { setYandexSession(''); setYandexConnected(false); setYandexError('Сессия Яндекса истекла. Подключите аккаунт заново.'); }
+        else setYandexError(cause instanceof Error && !/^\d+$/.test(cause.message) ? cause.message : 'Не удалось загрузить лайки. Подключение сохранено — нажмите «Обновить лайки».');
       }).finally(() => { if (!controller.signal.aborted) setLoadingLikes(false); });
     return () => controller.abort();
   }, [yandexSession]);
@@ -994,6 +1024,26 @@ export default function App() {
     catch { setError('Не удалось отправить трек. Подключитесь снова.'); return false; }
   }
 
+  function applyYandexPage(value: unknown, append = false) {
+    const page = yandexPage(value);
+    setYandexTracks((previous) => append ? Array.from(new Map([...previous, ...page.tracks].map((track) => [track.id, track])).values()) : page.tracks);
+    setHasMoreLikes(page.has_more); setNextLikesOffset(page.next_offset);
+    setYandexUnsupported((previous) => append ? previous + page.unsupported_count : page.unsupported_count);
+    setYandexConnected(true); setYandexError(page.library_error);
+  }
+
+  async function refreshYandexLikes() {
+    if (!yandexSession || loadingLikes) return;
+    const controller = new AbortController(); likesRequest.current?.abort(); likesRequest.current = controller;
+    setLoadingLikes(true); setYandexError('');
+    try {
+      const response = await fetch('/api/yandex/tracks?offset=0', { headers: { 'X-Yandex-Session': yandexSession }, signal: controller.signal });
+      if (!response.ok) throw new Error(response.status === 401 ? 'Доступ истёк. Подключите Яндекс Музыку заново.' : 'Не удалось загрузить лайки. Повторите попытку.');
+      const data: unknown = await response.json(); if (!controller.signal.aborted) applyYandexPage(data);
+    } catch (cause) { if (!controller.signal.aborted) setYandexError(cause instanceof Error ? cause.message : 'Не удалось загрузить лайки.'); }
+    finally { if (!controller.signal.aborted) setLoadingLikes(false); }
+  }
+
   async function startYandexLogin() {
     const controller = new AbortController();
     likesRequest.current?.abort();
@@ -1002,6 +1052,7 @@ export default function App() {
     setLoadingLikes(true);
     setYandexLogin(null);
     setYandexTracks([]);
+    setYandexUnsupported(0);
     setYandexError('');
     setYandexConnected(false);
     setYandexSession('');
@@ -1045,17 +1096,14 @@ export default function App() {
         return;
       }
       if (data.status !== 'authorized' || !('authenticated' in data) || data.authenticated !== true ||
-          !('tracks' in data) || !Array.isArray(data.tracks) || !data.tracks.every((track) => track &&
-          typeof track.id === 'string' && /^[0-9]{1,20}$/.test(track.id) &&
-          typeof track.title === 'string' && typeof track.artist === 'string')) throw new Error('Яндекс вернул некорректный список треков.');
-      if (!controller.signal.aborted && 'session' in data && typeof data.session === 'string') {
-        setYandexTracks(data.tracks);
+          !('session' in data) || typeof data.session !== 'string' || !/^[A-Za-z0-9_-]{32,128}$/.test(data.session))
+        throw new Error('Яндекс не подтвердил подключение аккаунта. Повторите вход.');
+      if (!controller.signal.aborted) {
         setYandexSession(data.session);
-        setHasMoreLikes('has_more' in data && data.has_more === true);
-        setNextLikesOffset('next_offset' in data && typeof data.next_offset === 'number' ? data.next_offset : data.tracks.length);
         setYandexConnected(true);
         setYandexLogin(null);
         setLoadingLikes(false);
+        applyYandexPage(data);
       }
     } catch (cause) {
       if (!controller.signal.aborted) {
@@ -1076,12 +1124,7 @@ export default function App() {
       });
       const data: unknown = await response.json();
       if (!response.ok) throw new Error(`Не удалось загрузить следующую порцию (HTTP ${response.status}).`);
-      if (!data || typeof data !== 'object' || !('tracks' in data) || !Array.isArray(data.tracks) ||
-          !('next_offset' in data) || typeof data.next_offset !== 'number' ||
-          !('has_more' in data) || typeof data.has_more !== 'boolean') throw new Error('Некорректный ответ Яндекса.');
-      setYandexTracks((previous) => [...previous, ...data.tracks as YandexTrack[]]);
-      setNextLikesOffset(data.next_offset);
-      setHasMoreLikes(data.has_more);
+      applyYandexPage(data, true);
     } catch (cause) { setYandexError(cause instanceof Error ? cause.message : 'Не удалось загрузить треки.'); }
     finally { setLoadingLikes(false); }
   }
@@ -1370,15 +1413,17 @@ export default function App() {
         <section className="card cardpad yandex-card" id="yandex-auth"><div className="sectionhead"><div><span className="eyebrow">ВАША МУЗЫКА</span><h3>Яндекс Музыка</h3></div></div>
           <p className="muted small">Подключите аккаунт, чтобы добавить лайкнутые треки. Добавленные вами треки звучат на устройстве хоста с вашего доступа к Яндекс Музыке.</p>
           <button className="button primary" onClick={() => void startYandexLogin()} disabled={loadingLikes}>{yandexConnected ? 'Подключить заново' : 'Подключить Яндекс Музыку →'}</button>
+          {yandexConnected && <button className="button tiny" style={{ marginLeft: 8 }} onClick={() => void refreshYandexLikes()} disabled={loadingLikes}>Обновить лайки</button>}
           {yandexLogin && <div className="authbox" style={{ marginTop: 16 }}>
             <span className="eyebrow">ПОДТВЕРДИТЕ ВХОД</span><p className="muted small">Откройте Яндекс, введите код и разрешите доступ.</p>
             <div className="row" style={{ flexWrap: 'wrap' }}><code className="code mono">{yandexLogin.user_code}</code><button className="button tiny" onClick={() => void copy(yandexLogin.user_code, 'Код')}>Копировать код</button></div>
             <a className="button primary linklike" style={{ marginTop: 14 }} href={yandexLogin.verification_url} target="_blank" rel="noopener noreferrer"
               onClick={(event) => { if (telegramInitData && telegram?.openLink) { event.preventDefault(); telegram.openLink(yandexLogin.verification_url); } }}>Открыть Яндекс ↗</a>
           </div>}
-          {loadingLikes && <p className="muted small" role="status">{yandexLogin ? 'Ждём подтверждения Яндекса…' : 'Получаем код входа…'}</p>}
+          {loadingLikes && <p className="muted small" role="status">{yandexLogin ? 'Ждём подтверждения Яндекса…' : yandexConnected ? 'Загружаем лайки…' : 'Получаем код входа…'}</p>}
           {yandexError && <p className="notice" role="alert">{yandexError}</p>}
           {yandexConnected && <p className="muted small" role="status">Загружено треков: {yandexTracks.length}</p>}
+          {yandexUnsupported > 0 && <p className="muted small">Некоторые записи ({yandexUnsupported}) пока недоступны нашему плееру. Остальные треки можно добавлять в очередь.</p>}
           {yandexTracks.length > 0 && <label className="field">Поиск среди загруженных треков
             <input value={yandexSearch} onChange={(event) => setYandexSearch(event.target.value)} placeholder="Название или исполнитель" aria-label="Поиск треков Яндекс Музыки" />
           </label>}
@@ -1387,8 +1432,8 @@ export default function App() {
           </p>}
           {yandexTracks.length > 0 && filteredYandexTracks.length === 0 && <p className="muted small">Среди загруженных треков ничего не найдено.</p>}
           {filteredYandexTracks.length > 0 && <ul className="likes">{filteredYandexTracks.map((track) => <li key={track.id}>
-            <div className="trackmeta"><strong>{track.title}</strong><small>{track.artist}</small></div>
-            <button className="button tiny" disabled={status !== 'connected'} onClick={() => enqueue(`yandex_${track.id}`, `${track.title} — ${track.artist}`)}>+ В очередь</button>
+            <div className="trackmeta"><strong>{track.title}</strong><small>{track.artist}</small>{!track.playable && <small>{track.reason}</small>}</div>
+            <button className="button tiny" disabled={status !== 'connected' || !track.playable} onClick={() => enqueue(`yandex_${track.id}`, `${track.title} — ${track.artist}`)}>{track.playable ? '+ В очередь' : 'Недоступно'}</button>
           </li>)}</ul>}
           {yandexConnected && hasMoreLikes && <button className="button tiny" onClick={() => void showMoreLikes()} disabled={loadingLikes}>Показать ещё</button>}
         </section>

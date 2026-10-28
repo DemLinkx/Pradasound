@@ -5,7 +5,8 @@ COPY frontend/package.json frontend/package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm npm ci
 COPY frontend/index.html frontend/tsconfig.json frontend/vite.config.ts ./
 COPY frontend/src ./src
-RUN npm run build
+COPY frontend/tests ./tests
+RUN npm test && npm run build
 
 FROM caddy:2.10.2-alpine AS runtime
 ARG SOURCE_URL=""
