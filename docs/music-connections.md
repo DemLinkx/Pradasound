@@ -16,6 +16,22 @@ SoundCloud перешёл на HLS/AAC. Main использует два пре�
 
 ## Spotify
 
+### Публичный плейлист без входа
+
+Основной доступный путь — `POST /api/music/spotify/public` со ссылкой
+`https://open.spotify.com/playlist/<ID>`. Share-параметры не нужны, но допустимы.
+Сервер читает публичные метаданные embed-страницы, без cookies, пользовательского
+токена и закрытого Web API. Доступны первые 100 позиций, порциями по 50;
+повторы и порядок сохраняются. Ограничение явно показано в интерфейсе.
+Остальные страницы этого снимка читаются локально, без повторных запросов Spotify.
+Парсер не использует anonymous-токены или audioPreview страницы.
+
+Проверена публичная ссылка пользователя `4v6LLPppL7oP4kENkzl8Nq`: 100 позиций
+с названиями и исполнителями. Личные лайки через этот путь не читаются:
+пользователь может самостоятельно собрать их в публичный плейлист.
+После явного согласия выбранный трек ищется на YouTube и добавляется
+в существующую очередь; оригинальное защищённое аудио Spotify не извлекается.
+
 ### Экспериментальный вход по коду
 
 `SPOTIFY_DEVICE_ENABLED=true` включает вход через `spotify.com/pair` без
@@ -30,8 +46,14 @@ https://docs.rs/spotstream/latest/src/spotstream/auth.rs.html .
 и сроком жизни кода (не более 10 минут). Секретный device_code и токены остаются
 на сервере. Отказ, slow_down и истечение кода обрабатываются явно.
 
-Выдача кода проверена живым запросом с VPS через VPN; фактический доступ
-`/me/tracks` устанавливается только после подтверждения пользователем.
+Выдача кода и подтверждение пользователем проверены с VPS через VPN.
+При реальной проверке `/me/tracks` вернул HTTP 429 сразу после входа;
+это не доказательство отсутствия подписки или ошибки аккаунта пользователя.
+Нативный Client ID не гарантирует доступ к Web API и личным лайкам.
+Ответы 429 сохраняют Retry-After, а распознанная причина QUOTA_EXCEEDED
+показывается отдельно. Повторные запросы того же подключения до срока
+не отправляются провайдеру; повторный вход не предлагается как исправление квоты.
+Нельзя утверждать QUOTA_EXCEEDED, если провайдер не прислал эту причину явно.
 При отказе API вход не объявляется успешным импортом: показывается ошибка
 библиотеки и сохраняется возможность повторить запрос. В логах только статус
 и число треков, без аккаунта/кодов/токенов. Воспроизведение — через согласованный
@@ -51,7 +73,7 @@ Development Mode требует Premium у владельца приложени
 При явном согласии пользователя название/исполнитель используются для поиска
 на YouTube. В очередь попадает найденный YouTube ID; исходная запись Spotify
 не скачивается. Версия записи может отличаться. Без ключей этот OAuth-вариант отключён;
-публичный импорт плейлистов Spotify не заявляется как работающий.
+публичные плейлисты импортируются отдельно без него.
 
 ## SoundCloud OAuth
 
@@ -104,6 +126,7 @@ OAuth в браузере пользователя всё равно завис�
 - `POST /api/music/{provider}/login`, `POST /api/music/{provider}/callback`: OAuth.
 - `POST /api/music/spotify/device`, `GET /api/music/spotify/device/{login_id}`: код Spotify.
 - `POST /api/music/soundcloud/public`: публичная ссылка `/имя/likes`.
+- `POST /api/music/spotify/public`: публичный плейлист, первые 100 позиций.
 - `GET /api/music/{provider}/tracks?cursor=…`, заголовок `X-Music-Session`.
 - `POST /api/music/spotify/resolve`: handle и импортированный track_id → YouTube ID.
 - `POST /api/music/{provider}/disconnect`, заголовок `X-Music-Session`.
@@ -112,7 +135,10 @@ OAuth в браузере пользователя всё равно завис�
 - `GET /api/music/queue/{lobby_id}/{item_id}/stream`, заголовок `X-Host-Token`.
 
 Библиотека возвращает `session`, `authenticated`, `tracks`, `next_cursor`,
-`has_more`. `authenticated=false` означает публичный импорт. В `tracks`
+`has_more`. Публичный импорт имеет `authenticated=false` и `import_notice`.
+Подтверждённый вход с отказом библиотеки также имеет `authenticated=false`,
+но дополнительно `library_error`, `library_error_status` и, для 429, `retry_after`.
+Он не считается публичным импортом. В `tracks`
 только метаданные/состояние доступности, без пользовательских токенов и stream URL.
 
 ## Источники
@@ -121,6 +147,7 @@ OAuth в браузере пользователя всё равно завис�
 - https://developers.soundcloud.com/blog/api-streaming-urls/
 - https://developer.spotify.com/documentation/web-api/concepts/quota-modes
 - https://developer.spotify.com/documentation/web-api/reference/get-users-saved-tracks
+- https://developer.spotify.com/documentation/web-api/concepts/rate-limits
 - https://github.com/VKCOM/vk-api-schema
 
 Тесты с подменённым API проверяют протокол/права и не доказывают доступность

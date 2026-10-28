@@ -37,7 +37,7 @@ type YandexLogin = { login_id: string; verification_url: string; user_code: stri
 type QueueItem = { id: string; track_id: string; owner_id: string; access_revision?: number; canonical_url?: string };
 type MusicProvider = 'spotify' | 'soundcloud' | 'vk';
 type MusicTrack = { id: string; title: string; artist: string; canonical_url: string; playable: boolean; reason?: string };
-type MusicLibrary = { session: string; authenticated: boolean; tracks: MusicTrack[]; next_cursor: string | null; has_more: boolean; library_error?: string };
+type MusicLibrary = { session: string; authenticated: boolean; tracks: MusicTrack[]; next_cursor: string | null; has_more: boolean; library_error?: string; library_error_status?: number; retry_after?: number; quota_reason?: string; import_notice?: string };
 type MusicCapability = { oauth: boolean; public_import: boolean; device_login?: boolean; experimental_token?: boolean; token_authorization_url?: string; token_application?: string; reason?: string };
 type MusicDeviceLogin = YandexLogin & { provider: MusicProvider };
 const MUSIC_LABELS: Record<MusicProvider, string> = { spotify: 'Spotify', soundcloud: 'SoundCloud', vk: 'VK Музыка' };
@@ -350,6 +350,8 @@ export default function App() {
   const [musicSearch, setMusicSearch] = useState('');
   const [musicError, setMusicError] = useState('');
   const [musicBusy, setMusicBusy] = useState(false);
+  const [musicRetryUntil, setMusicRetryUntil] = useState<Partial<Record<MusicProvider, number>>>({});
+  const [musicClock, setMusicClock] = useState(Date.now());
   const [musicDeviceLogin, setMusicDeviceLogin] = useState<MusicDeviceLogin | null>(null);
   const musicDeviceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [spotifyConsent, setSpotifyConsent] = useState(false);
@@ -444,14 +446,23 @@ export default function App() {
 
   function acceptMusic(provider: MusicProvider, library: MusicLibrary, append = false) {
     setMusicLibraries((previous) => ({ ...previous, [provider]: { ...library, tracks: append
-      ? Array.from(new Map([...(previous[provider]?.tracks || []), ...library.tracks].map((track) => [track.id, track])).values()) : library.tracks } }));
+      ? provider === 'spotify' && !library.authenticated ? [...(previous[provider]?.tracks || []), ...library.tracks] :
+        Array.from(new Map([...(previous[provider]?.tracks || []), ...library.tracks].map((track) => [track.id, track])).values()) : library.tracks } }));
     setMusicSessions((previous) => previous[provider] === library.session ? previous : { ...previous, [provider]: library.session });
+    const delay = Math.max(0, Math.min(86400, library.retry_after || 0));
+    setMusicClock(Date.now());
+    setMusicRetryUntil((previous) => ({ ...previous, [provider]: delay ? Date.now() + delay * 1000 : 0 }));
   }
 
   async function musicJson(url: string, options: RequestInit = {}): Promise<MusicLibrary> {
     const response = await fetch(url, options);
     const data = await response.json();
-    if (!response.ok) throw Object.assign(new Error(typeof data.detail === 'string' ? data.detail : `Сервис не ответил (HTTP ${response.status}).`), { status: response.status });
+    if (!response.ok) {
+      const header = response.headers.get('Retry-After') || '0';
+      const seconds = /^\d+$/.test(header) ? Number(header) : Math.ceil((Date.parse(header) - Date.now()) / 1000);
+      throw Object.assign(new Error(typeof data.detail === 'string' ? data.detail : `Сервис не ответил (HTTP ${response.status}).`),
+        { status: response.status, retry_after: Number.isFinite(seconds) ? Math.min(86400, Math.max(0, seconds)) : 0 });
+    }
     return data as MusicLibrary;
   }
 
@@ -533,6 +544,14 @@ export default function App() {
     const timer = window.setInterval(() => { if (oauthPopup.current?.closed) { oauthPopup.current = null; setMusicBusy(false); } }, 700);
     return () => window.clearInterval(timer);
   }, [musicBusy]);
+
+  useEffect(() => {
+    const until = musicRetryUntil[musicProvider] || 0;
+    setMusicClock(Date.now());
+    if (until <= Date.now()) return;
+    const timer = window.setInterval(() => { setMusicClock(Date.now()); if (Date.now() >= until) window.clearInterval(timer); }, 1000);
+    return () => window.clearInterval(timer);
+  }, [musicRetryUntil, musicProvider]);
 
   useEffect(() => () => { musicRequest.current?.abort(); if (musicDeviceTimer.current) clearTimeout(musicDeviceTimer.current); }, []);
 
@@ -907,7 +926,13 @@ export default function App() {
     const controller = new AbortController(); musicRequest.current?.abort(); musicRequest.current = controller;
     setMusicBusy(true); setMusicError('');
     try { await action(controller.signal, musicProvider); }
-    catch (cause) { if (!controller.signal.aborted) setMusicError(cause instanceof Error ? cause.message : 'Не удалось загрузить музыку.'); }
+    catch (cause) { if (!controller.signal.aborted) {
+      setMusicError(cause instanceof Error ? cause.message : 'Не удалось загрузить музыку.');
+      if (cause && typeof cause === 'object' && 'status' in cause && cause.status === 429 && 'retry_after' in cause && typeof cause.retry_after === 'number') {
+        const delay = Math.max(0, Math.min(86400, cause.retry_after));
+        setMusicClock(Date.now()); setMusicRetryUntil((previous) => ({ ...previous, [musicProvider]: Date.now() + delay * 1000 }));
+      }
+    } }
     finally { if (id === musicOperation.current) setMusicBusy(false); }
   }
 
@@ -932,7 +957,7 @@ export default function App() {
         throw new Error('Сервис не подтвердил доступ. Начните подключение заново.');
       acceptMusic(login.provider, { session: data.session, authenticated: data.authenticated === true, tracks: data.tracks,
         has_more: data.has_more === true, next_cursor: typeof data.next_cursor === 'string' ? data.next_cursor : null,
-        library_error: data.library_error });
+        library_error: data.library_error, library_error_status: data.library_error_status, retry_after: data.retry_after, quota_reason: data.quota_reason });
       setMusicError(data.library_error || ''); setMusicDeviceLogin(null); setMusicBusy(false);
     } catch (cause) {
       if (controller.signal.aborted) return;
@@ -993,7 +1018,7 @@ export default function App() {
     void musicOperationRequest(async (signal, provider) => {
       const library = await musicJson(`/api/music/${provider}/public`, { method: 'POST', signal,
         headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: musicUrl.trim() }) });
-      if (!signal.aborted) acceptMusic(provider, library);
+      if (!signal.aborted) { acceptMusic(provider, library); setMusicSearch(''); }
     });
   }
 
@@ -1309,6 +1334,7 @@ export default function App() {
   const nowTitle = currentTrack ? trackTitles[currentTrack] || `${sourceName(currentTrack)} · ${currentTrack}` : 'Музыка начинается здесь';
   const musicLibrary = musicLibraries[musicProvider];
   const musicCapability = musicCapabilities[musicProvider];
+  const musicCooldown = Math.max(0, Math.ceil(((musicRetryUntil[musicProvider] || 0) - musicClock) / 1000));
   const filteredMusic = (musicLibrary?.tracks || []).filter((track) => `${track.title} ${track.artist}`.toLocaleLowerCase('ru').includes(musicSearch.trim().toLocaleLowerCase('ru')));
   return <main className={`app ${telegramInitData ? 'telegram-app' : ''}`}><style>{STYLES}</style><div className="backdrop" aria-hidden="true" /><div className="shell">
     <header className="topbar"><div className="brand"><span className="brandmark"><img src={brandLogo} width="54" height="54" alt="" /></span> PRADA SOUND</div>
@@ -1518,16 +1544,19 @@ export default function App() {
               onClick={() => { setMusicProvider(provider); setMusicSearch(''); setMusicUrl(''); setMusicError(''); }}>{MUSIC_LABELS[provider]}</button>)}</div>
           <div role="tabpanel" aria-label={MUSIC_LABELS[musicProvider]}>
             {musicProvider === 'soundcloud' && <p className="muted small">Импортируйте публичные лайки по ссылке на профиль — бесплатного аккаунта достаточно. Приватная библиотека доступна через вход, когда подключено приложение SoundCloud.</p>}
-            {musicProvider === 'spotify' && <p className="muted small">Подключите аккаунт кодом на сайте Spotify. Импортируем лайки, а для воспроизведения подбираем запись на YouTube; она может отличаться от оригинала.</p>}
+            {musicProvider === 'spotify' && <p className="muted small">Вставьте ссылку на публичный плейлист Spotify — вход и Premium для импорта не нужны. Для воспроизведения подбираем запись на YouTube; она может отличаться от оригинала. Личные лайки можно собрать в публичный плейлист.</p>}
             {musicProvider === 'vk' && <p className="muted small">Экспериментальное подключение своей музыки через публичный OAuth. После подтверждения VK проверим, разрешён ли доступ к аудиозаписям.</p>}
-            {musicCapability?.device_login && <button className="button primary" disabled={musicBusy} onClick={() => void startMusicDevice()}>Подключить {MUSIC_LABELS[musicProvider]} по коду →</button>}
-            {musicCapability?.oauth && <button className="button primary" disabled={musicBusy} onClick={() => void startMusicLogin()}>Подключить {MUSIC_LABELS[musicProvider]} ↗</button>}
-            {musicCapability && !musicCapability.oauth && <p className="muted small">{musicCapability.reason}</p>}
             {musicCapability?.public_import && <form onSubmit={(event) => { event.preventDefault(); importMusic(); }} className="music-import">
               <label className="field">{musicProvider === 'soundcloud' ? 'Ссылка на публичные лайки' : 'Ссылка на публичный плейлист'}
                 <input type="url" required value={musicUrl} onChange={(event) => setMusicUrl(event.target.value)} placeholder={musicProvider === 'soundcloud' ? 'https://soundcloud.com/ваш-профиль/likes' : 'https://open.spotify.com/playlist/…'} aria-label={`Ссылка для импорта ${MUSIC_LABELS[musicProvider]}`} />
-              </label><button className="button primary" disabled={musicBusy || !musicUrl.trim()}>Загрузить треки</button>
+              </label><button className="button primary" disabled={musicBusy || !musicUrl.trim()}>{musicProvider === 'spotify' ? 'Загрузить плейлист' : 'Загрузить треки'}</button>
             </form>}
+            {musicCapability?.device_login && <details style={{ marginTop: 16 }}><summary>Личные лайки: экспериментальный вход</summary>
+              <p className="muted small">Spotify может подтвердить вход, но отклонить доступ к библиотеке приложения. Подписка и повторный вход не снимают это ограничение. В этом случае используйте публичный плейлист выше.</p>
+              <button className="button tiny" disabled={musicBusy || musicCooldown > 0} onClick={() => void startMusicDevice()}>Подключить {MUSIC_LABELS[musicProvider]} по коду →</button>
+            </details>}
+            {musicCapability?.oauth && <button className="button primary" disabled={musicBusy} onClick={() => void startMusicLogin()}>Подключить {MUSIC_LABELS[musicProvider]} ↗</button>}
+            {musicCapability && !musicCapability.oauth && !musicCapability.public_import && <p className="muted small">{musicCapability.reason}</p>}
             {musicDeviceLogin && <div className="authbox" style={{ marginTop: 16 }}><span className="eyebrow">ПОДТВЕРДИТЕ ВХОД {MUSIC_LABELS[musicDeviceLogin.provider]}</span>
               <p className="muted small">Откройте страницу Spotify, войдите в свой аккаунт и подтвердите код. Библиотека загрузится после проверки доступа.</p>
               <div className="row" style={{ flexWrap: 'wrap' }}><code className="code mono">{musicDeviceLogin.user_code}</code>
@@ -1551,13 +1580,15 @@ export default function App() {
             {musicProvider === 'spotify' && <label className="music-consent"><input type="checkbox" checked={spotifyConsent} onChange={(event) => setSpotifyConsent(event.target.checked)} />Разрешаю подбирать и воспроизводить записи через YouTube</label>}
             {musicBusy && <p className="muted small" role="status">{musicDeviceLogin ? 'Ждём подтверждения Spotify…' : 'Загружаем музыку…'}</p>}
             {musicError && <p className="notice" role="alert">{musicError}</p>}
-            {!musicLibrary && musicSessions[musicProvider] && <button className="button tiny" disabled={musicBusy} onClick={restoreMusic}>Восстановить подключение</button>}
+            {musicCooldown > 0 && <p className="muted small" role="status">Повторный запрос станет доступен через {musicCooldown >= 3600 ? `${Math.ceil(musicCooldown / 3600)} ч` : musicCooldown >= 60 ? `${Math.ceil(musicCooldown / 60)} мин` : `${musicCooldown} с`}. Повторный вход не ускоряет ожидание.{musicProvider === 'spotify' && ' Публичный плейлист можно импортировать отдельно выше.'}</p>}
+            {!musicLibrary && musicSessions[musicProvider] && <button className="button tiny" disabled={musicBusy || musicCooldown > 0} onClick={restoreMusic}>Восстановить подключение</button>}
             {musicLibrary && <>
+              {musicLibrary.import_notice && <p className="muted small">{musicLibrary.import_notice}</p>}
               <div className="row" style={{ justifyContent: 'space-between', flexWrap: 'wrap' }}><p className="muted small">{musicLibrary.library_error ? 'Вход подтверждён, библиотека недоступна' : musicLibrary.authenticated ? 'Библиотека подключена' : 'Публичный импорт'} · {musicLibrary.tracks.length} треков</p>
-                <span className="row" style={{ flexWrap: 'wrap' }}><button className="button tiny" disabled={musicBusy} onClick={restoreMusic}>Обновить библиотеку</button>
+                <span className="row" style={{ flexWrap: 'wrap' }}><button className="button tiny" disabled={musicBusy || musicCooldown > 0} onClick={restoreMusic}>Обновить библиотеку</button>
                 <button className="button tiny" disabled={musicBusy} onClick={() => void disconnectMusic()}>Отключить</button></span></div>
               <label className="field">Поиск среди загруженных треков<input value={musicSearch} onChange={(event) => setMusicSearch(event.target.value)} placeholder="Название или исполнитель" aria-label={`Поиск ${MUSIC_LABELS[musicProvider]}`} /></label>
-              <ul className="likes">{filteredMusic.map((track) => <li key={track.id}><div className="trackmeta"><strong>{track.title}</strong><small>{track.artist || MUSIC_LABELS[musicProvider]}</small>
+              <ul className="likes">{filteredMusic.map((track, index) => <li key={`${track.id}:${index}`}><div className="trackmeta"><strong>{track.title}</strong><small>{track.artist || MUSIC_LABELS[musicProvider]}</small>
                 {track.canonical_url && <a className="music-source" href={track.canonical_url} target="_blank" rel="noopener noreferrer">{MUSIC_LABELS[musicProvider]} ↗</a>}
                 {!track.playable && <small>{track.reason || 'Полный трек недоступен'}</small>}</div>
                 <button className="button tiny" disabled={status !== 'connected' || musicBusy || !track.playable || musicProvider === 'spotify' && !spotifyConsent} onClick={() => enqueueMusic(track)}>+ В очередь</button></li>)}</ul>

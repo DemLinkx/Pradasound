@@ -6,12 +6,15 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import json
 import logging
 import math
 import re
 import secrets
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from time import monotonic
 from typing import Any
 from urllib.parse import urlencode, urljoin, urlparse
@@ -65,6 +68,10 @@ class MusicSession:
     page_urls: dict[str, str] = field(default_factory=dict)
     client_id: str = ""
     proxy: str | None = None
+    cooldown_until: float = 0
+    quota_reason: str = ""
+    public_tracks: list[dict[str, object]] = field(default_factory=list)
+    public_notice: str = ""
 
 
 @dataclass
@@ -252,17 +259,89 @@ def _session(handle: str, provider: str | None = None) -> MusicSession:
     return session
 
 
+def _retry_after_seconds(value: str | None) -> int:
+    if value is None:
+        return 60
+    text = value.strip()
+    if text.isascii() and text.isdecimal():
+        return 86400 if len(text) > 20 else min(86400, int(text))
+    try:
+        moment = parsedate_to_datetime(text)
+        if moment.tzinfo is None:
+            return 60
+        seconds = math.ceil((moment - datetime.now(UTC)).total_seconds())
+        return max(0, min(86400, seconds))
+    except (TypeError, ValueError, OverflowError):
+        return 60
+
+
+def _rate_reason(response: httpx.Response) -> str:
+    if len(response.content) > 65536:
+        return "unknown"
+    try:
+        body = response.json()
+    except ValueError:
+        return "unknown"
+    if not isinstance(body, dict):
+        return "unknown"
+    nested = body.get("error")
+    candidates = [body.get("reason")]
+    if isinstance(nested, dict):
+        candidates.append(nested.get("reason"))
+    return "QUOTA_EXCEEDED" if "QUOTA_EXCEEDED" in candidates else "unknown"
+
+
+def _rate_detail(provider: str, reason: str, seconds: int) -> str:
+    if provider == "spotify" and reason == "QUOTA_EXCEEDED":
+        return "Spotify ограничил квоту приложения; повторный вход это не исправляет"
+    if provider == "spotify":
+        return f"Spotify отклонил запрос (429); повторная проверка через {seconds} с"
+    return "Лимит музыкального сервиса; попробуйте позже"
+
+
+def _spotify_cooldown(session: MusicSession) -> None:
+    seconds = math.ceil(session.cooldown_until - monotonic())
+    if seconds <= 0:
+        return
+    headers = {"Retry-After": str(seconds)}
+    if session.quota_reason == "QUOTA_EXCEEDED":
+        headers["X-Music-Rate-Reason"] = "QUOTA_EXCEEDED"
+    raise HTTPException(
+        429, _rate_detail("spotify", session.quota_reason, seconds), headers=headers
+    )
+
+
+def _rate_failure(response: httpx.Response, url: str) -> HTTPException:
+    host = urlparse(url).hostname
+    provider = (
+        "spotify"
+        if host in {"api.spotify.com", "accounts.spotify.com", "open.spotify.com"}
+        else "soundcloud"
+        if host in {"api.soundcloud.com", "secure.soundcloud.com"}
+        else "unknown"
+    )
+    reason = _rate_reason(response)
+    delay = _retry_after_seconds(response.headers.get("Retry-After"))
+    if provider != "unknown":
+        logging.getLogger("uvicorn.error").warning(
+            "music_provider_rate_limit provider=%s reason=%s retry_after=%d",
+            provider,
+            reason,
+            delay,
+        )
+    headers = {"Retry-After": str(delay)}
+    if reason == "QUOTA_EXCEEDED" and provider == "spotify":
+        headers["X-Music-Rate-Reason"] = reason
+    return HTTPException(429, _rate_detail(provider, reason, delay), headers=headers)
+
+
 async def _call(client: httpx.AsyncClient, method: str, url: str, **kwargs: Any) -> dict[str, Any]:
     try:
         response = await client.request(method, url, **kwargs)
     except httpx.HTTPError:
         raise HTTPException(502, "Музыкальный сервис временно недоступен") from None
     if response.status_code == 429:
-        raise HTTPException(
-            429,
-            "Лимит музыкального сервиса; попробуйте позже",
-            headers={"Retry-After": response.headers.get("Retry-After", "10")},
-        )
+        raise _rate_failure(response, url)
     if response.status_code in (401, 403):
         raise HTTPException(403, "Нет доступа к музыкальной библиотеке")
     if response.status_code >= 400 or len(response.content) > 2_000_000:
@@ -274,6 +353,138 @@ async def _call(client: httpx.AsyncClient, method: str, url: str, **kwargs: Any)
     if not isinstance(body, dict):
         raise HTTPException(502, "Некорректный ответ музыкального сервиса")
     return body
+
+
+def _spotify_playlist_id(url: str) -> str:
+    if not _safe_provider_url(url, "spotify"):
+        raise HTTPException(400, "Нужна ссылка на публичный плейлист Spotify")
+    match = re.fullmatch(r"/(?:intl-[A-Za-z]{2}/)?playlist/([A-Za-z0-9]{22})/?", urlparse(url).path)
+    if match is None:
+        raise HTTPException(400, "Нужна ссылка на публичный плейлист Spotify")
+    return match.group(1)
+
+
+def _spotify_embed_host(url: str) -> bool:
+    try:
+        parsed = urlparse(url)
+        return (
+            parsed.scheme == "https"
+            and parsed.hostname in {"open.spotify.com", "www.spotify.com"}
+            and parsed.port is None
+            and not parsed.username
+            and not parsed.password
+            and not parsed.fragment
+            and len(url) <= 2048
+        )
+    except ValueError:
+        return False
+
+
+async def _spotify_embed_html(playlist_id: str) -> str:
+    url = f"https://open.spotify.com/embed/playlist/{playlist_id}"
+    selected_proxy = _proxy()
+    async with _client(selected_proxy) as client:
+        for _ in range(4):
+            if not _spotify_embed_host(url):
+                raise HTTPException(502, "Spotify перенаправил на недопустимый адрес")
+            try:
+                request = client.build_request("GET", url, headers={"Accept": "text/html"})
+                response = await client.send(request, stream=True)
+            except httpx.HTTPError:
+                raise HTTPException(502, "Публичный плейлист Spotify временно недоступен") from None
+            try:
+                if response.status_code in (301, 302, 303, 307, 308):
+                    location = response.headers.get("Location", "")
+                    next_url = urljoin(url, location)
+                    if not _spotify_embed_host(next_url):
+                        raise HTTPException(502, "Spotify перенаправил на недопустимый адрес")
+                    url = next_url
+                    continue
+                if response.status_code == 429:
+                    content = await _bounded_body(response, 65536)
+                    limited = httpx.Response(429, headers=response.headers, content=content)
+                    raise _rate_failure(limited, url)
+                if response.status_code in (403, 404):
+                    raise HTTPException(403, "Публичный плейлист Spotify недоступен")
+                if response.status_code != 200:
+                    raise HTTPException(502, "Spotify отклонил публичный плейлист")
+                content = await _bounded_body(response, 2_000_000)
+                try:
+                    return content.decode("utf-8")
+                except UnicodeDecodeError:
+                    raise HTTPException(502, "Некорректный ответ Spotify") from None
+            finally:
+                await response.aclose()
+    raise HTTPException(502, "Слишком много перенаправлений Spotify")
+
+
+def _spotify_embed_tracks(html: str) -> list[dict[str, object]]:
+    match = re.search(
+        r"<script\b[^>]*\bid\s*=\s*[\"']__NEXT_DATA__[\"'][^>]*>(.*?)</script\s*>",
+        html,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if match is None:
+        raise HTTPException(422, "Публичные треки Spotify в этой ссылке недоступны")
+    try:
+        page = json.loads(match.group(1))
+        entity = page["props"]["pageProps"]["state"]["data"]["entity"]
+        raw_tracks = entity["trackList"]
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(422, "Публичные треки Spotify в этой ссылке недоступны") from None
+    if not isinstance(raw_tracks, list) or not raw_tracks:
+        raise HTTPException(422, "Плейлист Spotify не содержит доступных публичных треков")
+    result: list[dict[str, object]] = []
+    for raw in raw_tracks[:100]:
+        if not isinstance(raw, dict) or raw.get("entityType") != "track":
+            continue
+        uri = raw.get("uri")
+        title = raw.get("title")
+        artist = raw.get("subtitle")
+        if not isinstance(uri, str) or not isinstance(title, str) or not title.strip():
+            continue
+        track_match = re.fullmatch(r"spotify:track:([A-Za-z0-9]{22})", uri)
+        if track_match is None:
+            continue
+        track_id = track_match.group(1)
+        playable = raw.get("isPlayable") is True
+        result.append(
+            {
+                "id": track_id,
+                "title": title[:200],
+                "artist": artist[:200] if isinstance(artist, str) else "",
+                "canonical_url": f"https://open.spotify.com/track/{track_id}",
+                "playable": playable,
+                "reason": "Для Spotify воспроизведение через найденное видео YouTube"
+                if playable
+                else "Трек Spotify недоступен",
+            }
+        )
+    if not result:
+        raise HTTPException(422, "Публичные треки Spotify в этой ссылке недоступны")
+    return result
+
+
+def _spotify_public_page(session: MusicSession, handle: str, cursor: str) -> dict[str, Any]:
+    try:
+        offset = int(cursor or "0")
+    except ValueError:
+        raise HTTPException(400, "Некорректная страница") from None
+    if offset < 0 or offset >= 100 or str(offset) != (cursor or "0"):
+        raise HTTPException(400, "Некорректная страница")
+    page = session.public_tracks[offset : offset + PAGE_SIZE]
+    if not page and offset:
+        raise HTTPException(400, "Страница плейлиста не найдена")
+    next_offset = offset + PAGE_SIZE
+    more = next_offset < len(session.public_tracks)
+    return {
+        "session": handle,
+        "authenticated": False,
+        "tracks": page,
+        "next_cursor": str(next_offset) if more else None,
+        "has_more": more,
+        "import_notice": session.public_notice,
+    }
 
 
 async def _refresh(session: MusicSession) -> None:
@@ -528,7 +739,7 @@ async def providers() -> dict[str, Any]:
         result[provider] = {
             "oauth": enabled and provider != "vk",
             "device_login": device_enabled,
-            "public_import": provider == "soundcloud",
+            "public_import": provider in {"spotify", "soundcloud"},
             "experimental_token": enabled and provider == "vk",
             "reason": reason,
         }
@@ -728,10 +939,17 @@ async def poll_device(provider: str, login_id: str, request: Request) -> dict[st
                 "tracks": [],
                 "has_more": False,
                 "next_cursor": None,
+                "library_error_status": exc.status_code,
                 "library_error": (
                     f"Доступ подтверждён, но библиотека Spotify недоступна: {exc.detail}"
                 ),
             }
+            if exc.status_code == 429:
+                library["retry_after"] = _retry_after_seconds(
+                    (exc.headers or {}).get("Retry-After")
+                )
+                if (exc.headers or {}).get("X-Music-Rate-Reason") == "QUOTA_EXCEEDED":
+                    library["quota_reason"] = "QUOTA_EXCEEDED"
         logging.getLogger("uvicorn.error").info(
             "music_device_authorized provider=spotify library_access=%s tracks=%d http_status=%d",
             library_status == 200,
@@ -902,12 +1120,16 @@ async def tracks(
 ) -> dict[str, Any]:
     _provider(provider)
     session = _session(x_music_session, provider)
+    if provider == "spotify" and session.public_url:
+        return _spotify_public_page(session, x_music_session, cursor)
     if provider == "soundcloud" and session.public_url:
         return await public_import(
             "soundcloud",
             PublicBody(url=session.public_url, session=x_music_session, cursor=cursor),
             request,
         )
+    if provider == "spotify":
+        _spotify_cooldown(session)
     await _refresh(session)
     try:
         offset = int(cursor or "0")
@@ -916,14 +1138,23 @@ async def tracks(
     if offset < 0 or offset >= MAX_TRACKS or str(offset) != (cursor or "0"):
         raise HTTPException(400, "Некорректная страница")
     if provider == "spotify":
-        async with _client(session.proxy if session.client_id else _proxy()) as client:
-            body = await _call(
-                client,
-                "GET",
-                f"{SPOTIFY_API}/me/tracks",
-                params={"limit": PAGE_SIZE, "offset": offset},
-                headers={"Authorization": f"Bearer {session.access_token}"},
-            )
+        async with session.lock:
+            _spotify_cooldown(session)
+            try:
+                async with _client(session.proxy if session.client_id else _proxy()) as client:
+                    body = await _call(
+                        client,
+                        "GET",
+                        f"{SPOTIFY_API}/me/tracks",
+                        params={"limit": PAGE_SIZE, "offset": offset},
+                        headers={"Authorization": f"Bearer {session.access_token}"},
+                    )
+            except HTTPException as exc:
+                if exc.status_code == 429:
+                    retry = _retry_after_seconds((exc.headers or {}).get("Retry-After"))
+                    session.cooldown_until = monotonic() + retry
+                    session.quota_reason = (exc.headers or {}).get("X-Music-Rate-Reason", "")
+                raise
         raw_items = [item.get("track") for item in body.get("items", []) if isinstance(item, dict)]
         more = bool(body.get("next"))
     elif provider == "soundcloud":
@@ -1030,6 +1261,22 @@ async def public_import(provider: str, body: PublicBody, request: Request) -> di
     _provider(provider)
     if not _safe_provider_url(body.url, provider):
         raise HTTPException(400, "Недопустимая ссылка на музыкальный сервис")
+    if provider == "spotify":
+        if body.session or body.cursor:
+            raise HTTPException(400, "Используйте сохранённую сессию для следующей страницы")
+        playlist_id = _spotify_playlist_id(body.url)
+        html = await _spotify_embed_html(playlist_id)
+        imported = _spotify_embed_tracks(html)
+        handle = _store("spotify", "", expires_in=SESSION_TTL)
+        spotify_session = SESSIONS[handle]
+        spotify_session.public_url = f"https://open.spotify.com/playlist/{playlist_id}"
+        spotify_session.public_tracks = imported
+        spotify_session.public_notice = (
+            "Публичный импорт: максимум первые 100 треков плейлиста; личные лайки в него не входят."
+        )
+        for item in imported:
+            spotify_session.imported[str(item["id"])] = item
+        return _spotify_public_page(spotify_session, handle, "")
     if provider != "soundcloud":
         raise HTTPException(501, "Публичный импорт этого сервиса пока не подтверждён")
     parsed = urlparse(body.url)

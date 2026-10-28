@@ -1,4 +1,7 @@
 import asyncio
+import json
+from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime
 from time import monotonic
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
@@ -769,3 +772,252 @@ def test_spotify_device_denied_and_expired(client, monkeypatch):
     music.PENDING_DEVICES[login_id].expires = monotonic() - 1
     expired = client.get(f"/api/music/spotify/device/{login_id}")
     assert expired.status_code == 410
+
+
+def test_spotify_quota_reason_and_retry_after_are_sanitized(monkeypatch, caplog):
+    caplog.set_level("WARNING", logger="uvicorn.error")
+
+    def handler(request):
+        return httpx.Response(
+            429,
+            headers={"Retry-After": "120"},
+            json={"error": {"reason": "QUOTA_EXCEEDED", "message": "private-user-id secret"}},
+        )
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            await music._call(client, "GET", "https://api.spotify.com/v1/me/tracks")
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(run())
+    assert exc.value.status_code == 429
+    assert exc.value.headers["Retry-After"] == "120"
+    assert exc.value.headers["X-Music-Rate-Reason"] == "QUOTA_EXCEEDED"
+    assert "повторный вход это не исправляет" in exc.value.detail
+    assert (
+        "music_provider_rate_limit provider=spotify reason=QUOTA_EXCEEDED retry_after=120"
+        in caplog.text
+    )
+    assert "private-user-id" not in caplog.text
+
+
+def test_retry_after_http_date_and_bad_body_are_bounded():
+    future = format_datetime(datetime.now(UTC) + timedelta(seconds=75), usegmt=True)
+    assert 73 <= music._retry_after_seconds(future) <= 75
+    assert music._retry_after_seconds("999999") == 86400
+    assert music._retry_after_seconds("9" * 40) == 86400
+    assert music._retry_after_seconds("not-a-date") == 60
+    response = httpx.Response(429, content=b"not json")
+    assert music._rate_reason(response) == "unknown"
+    unknown = httpx.Response(429, json={"reason": "some-private-reason"})
+    assert music._rate_reason(unknown) == "unknown"
+
+
+def test_spotify_library_cooldown_blocks_second_external_request(client, monkeypatch):
+    handle = music._store("spotify", "access")
+    calls = 0
+
+    def handler(request):
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            429, headers={"Retry-After": "90"}, json={"error": {"reason": "QUOTA_EXCEEDED"}}
+        )
+
+    monkeypatch.setattr(
+        music,
+        "_client",
+        lambda proxy=None: httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), trust_env=False
+        ),
+    )
+    first = client.get("/api/music/spotify/tracks", headers={"X-Music-Session": handle})
+    second = client.get("/api/music/spotify/tracks", headers={"X-Music-Session": handle})
+    assert first.status_code == second.status_code == 429
+    assert calls == 1
+    assert 89 <= int(second.headers["Retry-After"]) <= 90
+    assert "повторный вход это не исправляет" in second.json()["detail"]
+
+
+def test_device_approval_preserves_session_when_library_rate_limited(client, monkeypatch):
+    monkeypatch.setattr(music.settings, "spotify_device_enabled", True)
+    calls = []
+
+    def handler(request):
+        calls.append(request.url.path)
+        if request.url.path.endswith("/device/authorize"):
+            return httpx.Response(
+                200,
+                json={
+                    "device_code": "hidden",
+                    "user_code": "ABC",
+                    "verification_uri": "https://spotify.com/pair",
+                    "expires_in": 600,
+                    "interval": 5,
+                },
+            )
+        if request.url.path.endswith("/api/token"):
+            return httpx.Response(200, json={"access_token": "access", "expires_in": 3600})
+        return httpx.Response(429, headers={"Retry-After": "75"}, json={"reason": "QUOTA_EXCEEDED"})
+
+    monkeypatch.setattr(
+        music,
+        "_client",
+        lambda proxy=None: httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), trust_env=False
+        ),
+    )
+    login_id = client.post("/api/music/spotify/device").json()["login_id"]
+    music.PENDING_DEVICES[login_id].next_poll = monotonic() - 1
+    approved = client.get(f"/api/music/spotify/device/{login_id}").json()
+    assert approved["status"] == "authorized"
+    assert approved["authenticated"] is False
+    assert approved["library_error_status"] == 429
+    assert approved["retry_after"] == 75
+    assert approved["quota_reason"] == "QUOTA_EXCEEDED"
+    assert approved["session"] in music.SESSIONS
+    retry = client.get(
+        "/api/music/spotify/tracks", headers={"X-Music-Session": approved["session"]}
+    )
+    assert retry.status_code == 429
+    assert calls.count("/v1/me/tracks") == 1
+
+
+def _spotify_embed_page(count: int) -> str:
+    tracks = [
+        {
+            "uri": f"spotify:track:{i:022d}" if i else "spotify:track:0000000000000000000001",
+            "title": f"Song {i}",
+            "subtitle": "Artist",
+            "duration": 180000,
+            "isPlayable": i != 2,
+            "entityType": "track",
+        }
+        for i in range(count)
+    ]
+    page = {
+        "props": {
+            "pageProps": {
+                "state": {
+                    "data": {
+                        "entity": {"trackList": tracks, "accessToken": "secret-embedded-token"}
+                    }
+                }
+            }
+        }
+    }
+    payload = json.dumps(page)
+    return f'<html><script id="__NEXT_DATA__" type="application/json">{payload}</script></html>'
+
+
+def test_spotify_public_playlist_15_tracks_without_credentials(client, monkeypatch):
+    html = _spotify_embed_page(15)
+    seen = []
+
+    def handler(request):
+        seen.append(str(request.url))
+        return httpx.Response(200, text=html)
+
+    monkeypatch.setattr(
+        music,
+        "_client",
+        lambda proxy=None: httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), trust_env=False
+        ),
+    )
+    response = client.post(
+        "/api/music/spotify/public",
+        json={"url": "https://open.spotify.com/intl-de/playlist/7EtiSLKUiHY7vmJ7SikOaj?si=share"},
+    )
+    assert response.status_code == 200
+    page = response.json()
+    assert page["authenticated"] is False
+    assert len(page["tracks"]) == 15
+    assert page["tracks"][0]["id"] == page["tracks"][1]["id"]  # Positions preserved.
+    assert page["tracks"][2]["playable"] is False
+    assert page["has_more"] is False
+    assert "100" in page["import_notice"]
+    assert "secret-embedded-token" not in str(page)
+    assert seen == ["https://open.spotify.com/embed/playlist/7EtiSLKUiHY7vmJ7SikOaj"]
+    handle = page["session"]
+    assert music.validate_track("spotify", handle, page["tracks"][1]["id"])["title"] == "Song 1"
+
+
+def test_spotify_public_playlist_caps_at_100_and_pages_locally(client, monkeypatch):
+    html = _spotify_embed_page(105)
+    calls = 0
+
+    def handler(request):
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, text=html)
+
+    monkeypatch.setattr(
+        music,
+        "_client",
+        lambda proxy=None: httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), trust_env=False
+        ),
+    )
+    first = client.post(
+        "/api/music/spotify/public",
+        json={"url": "https://open.spotify.com/playlist/7EtiSLKUiHY7vmJ7SikOaj"},
+    ).json()
+    assert len(first["tracks"]) == 50 and first["has_more"] is True
+    assert first["next_cursor"] == "50"
+    second = client.get(
+        "/api/music/spotify/tracks?cursor=50", headers={"X-Music-Session": first["session"]}
+    ).json()
+    assert len(second["tracks"]) == 50 and second["has_more"] is False
+    assert second["next_cursor"] is None
+    assert calls == 1  # Public pagination never calls private Spotify API.
+    assert len(music.SESSIONS[first["session"]].public_tracks) == 100
+
+
+def test_spotify_public_playlist_rejects_missing_embed_and_ssrf(client, monkeypatch):
+    calls = []
+
+    def handler(request):
+        calls.append(request.url.host)
+        return httpx.Response(302, headers={"Location": "https://evil.example/playlist"})
+
+    monkeypatch.setattr(
+        music,
+        "_client",
+        lambda proxy=None: httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), trust_env=False
+        ),
+    )
+    invalid = client.post(
+        "/api/music/spotify/public",
+        json={"url": "https://open.spotify.com.evil.example/playlist/7EtiSLKUiHY7vmJ7SikOaj"},
+    )
+    assert invalid.status_code == 400 and calls == []
+    redirected = client.post(
+        "/api/music/spotify/public",
+        json={"url": "https://open.spotify.com/playlist/7EtiSLKUiHY7vmJ7SikOaj"},
+    )
+    assert redirected.status_code == 502
+    assert calls == ["open.spotify.com"]
+    with pytest.raises(HTTPException) as exc:
+        music._spotify_embed_tracks("<html>editorial page without trackList</html>")
+    assert exc.value.status_code == 422
+
+
+def test_spotify_public_embed_body_is_bounded(client, monkeypatch):
+    monkeypatch.setattr(
+        music,
+        "_client",
+        lambda proxy=None: httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, content=b"x" * 2_000_001)
+            ),
+            trust_env=False,
+        ),
+    )
+    response = client.post(
+        "/api/music/spotify/public",
+        json={"url": "https://open.spotify.com/playlist/7EtiSLKUiHY7vmJ7SikOaj"},
+    )
+    assert response.status_code == 502
+    assert not music.SESSIONS
