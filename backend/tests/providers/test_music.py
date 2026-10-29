@@ -1227,3 +1227,37 @@ def test_vk_legacy_audio_pages_work_through_login_and_load_more(client, monkeypa
     assert len(next_page["tracks"]) == 50 and next_page["next_cursor"] == "100"
     last = client.get("/api/music/vk/tracks?cursor=100", headers=headers).json()
     assert len(last["tracks"]) == 1 and last["has_more"] is False
+
+
+
+def test_vk_default_kate_header_matches_token_application(monkeypatch):
+    original = music._value
+    monkeypatch.setattr(music, "_value", lambda name, default="": "" if
+                        name == "vk_audio_user_agent" else original(name, default))
+    assert music._vk_headers()["User-Agent"].startswith("KateMobileAndroid/")
+
+
+def test_vk_compatible_version_is_used_for_login_pages_and_playback(client, monkeypatch):
+    monkeypatch.setattr(music.settings, "vk_audio_enabled", True)
+    seen = []
+
+    def handler(request):
+        data = parse_qs(request.content.decode())
+        seen.append(request.url.path)
+        assert data["v"] == ["5.131"]
+        assert request.headers["User-Agent"].startswith("KateMobileAndroid/")
+        row = {"id": 2, "owner_id": 1, "title": "Song", "artist": "Artist",
+               "url": "https://cs1.vkuseraudio.net/full.mp3"}
+        payload = [row] if request.url.path.endswith("audio.getById") else {
+            "count": 1, "items": [row]}
+        return httpx.Response(200, json={"response": payload})
+
+    monkeypatch.setattr(music, "_client", lambda proxy=None: httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), trust_env=False))
+    login = client.post("/api/music/vk/login", json={"token": "x" * 30})
+    assert login.status_code == 200
+    monkeypatch.setattr(music, "_queue_item", lambda *args: (
+        "vk", login.json()["session"], "1_2"))
+    stream = client.get("/api/music/queue/room/item/stream")
+    assert stream.status_code == 200
+    assert len(seen) == 3

@@ -40,6 +40,11 @@ SPOTIFY_DEVICE_ID = "65b708073fc0480ea92a077233ca87bd"
 SPOTIFY_API = "https://api.spotify.com/v1"
 SC_API = "https://api.soundcloud.com"
 VK_API = "https://api.vk.ru/method"
+VK_AUDIO_VERSION = "5.131"
+VK_KATE_AGENT = (
+    "KateMobileAndroid/52.2.2 lite-448 "
+    "(Android 6.0; SDK 23; arm64-v8a; alps Razar; ru)"
+)
 VK_PUBLIC_CLIENT_ID = "2685278"
 ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
@@ -157,8 +162,10 @@ def _credentials(provider: str) -> tuple[str, str]:
 
 def _vk_headers() -> dict[str, str]:
     agent = str(_value("vk_audio_user_agent", "")).strip()
+    if not agent and str(_value("vk_public_client_id", VK_PUBLIC_CLIENT_ID)) == "2685278":
+        agent = VK_KATE_AGENT
     if not agent:
-        return {}
+        raise HTTPException(503, "Для приложения VK не настроен музыкальный клиент")
     if len(agent) > 256 or "\r" in agent or "\n" in agent:
         raise HTTPException(503, "Некорректная настройка VK")
     return {"User-Agent": agent}
@@ -1168,7 +1175,7 @@ async def vk_login(body: TokenBody, request: Request) -> dict[str, Any]:
             client,
             "POST",
             f"{VK_API}/audio.get",
-            data={"access_token": token, "v": "5.199", "count": 1},
+            data={"access_token": token, "v": VK_AUDIO_VERSION, "count": 1},
             headers=_vk_headers(),
         )
     _vk_audio_page(data)
@@ -1310,8 +1317,9 @@ def _vk_error(body: dict[str, Any]) -> None:
                                 "для сервера. Получите новую ссылку через кнопку входа "
                                 "с «доступом в любое время»")
         if code == 3:
-            raise HTTPException(403, "VK не поддерживает музыкальный метод для этого "
-                                "приложения; повторное копирование токена не поможет")
+            raise HTTPException(403, "VK вернул код 3: музыкальный метод недоступен "
+                                "для текущего подключения. Причина не связана с "
+                                "копированием ссылки; требуется другой способ доступа к музыке")
         if code == 8:
             raise HTTPException(403, "VK заблокировал приложение, выдавшее токен")
         if code in {6, 9}:
@@ -1405,7 +1413,7 @@ async def tracks(
                 f"{VK_API}/audio.get",
                 data={
                     "access_token": session.access_token,
-                    "v": "5.199",
+                    "v": VK_AUDIO_VERSION,
                     "count": PAGE_SIZE,
                     "offset": offset,
                 },
@@ -1621,7 +1629,8 @@ async def queue_stream(
                 client,
                 "POST",
                 f"{VK_API}/audio.getById",
-                data={"access_token": session.access_token, "v": "5.199", "audios": raw_id},
+                data={"access_token": session.access_token, "v": VK_AUDIO_VERSION,
+                      "audios": raw_id},
                 headers=_vk_headers(),
             )
         _vk_error(body)
