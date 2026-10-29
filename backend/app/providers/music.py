@@ -200,6 +200,28 @@ def _vk_access_token(value: str) -> str:
     return token
 
 
+def _vk_audio_page(body: dict[str, Any]) -> tuple[list[Any], int | None]:
+    _vk_error(body)
+    payload = body.get("response")
+    rows, total = None, None
+    if isinstance(payload, dict):
+        rows, total = payload.get("items"), payload.get("count")
+    elif isinstance(payload, list):
+        if payload and type(payload[0]) is int:
+            total, rows = payload[0], payload[1:]
+        else:
+            rows = payload
+    if (not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows) or
+            total is not None and (type(total) is not int or total < 0)):
+        logging.getLogger("uvicorn.error").warning(
+            "music_vk_audio_shape response_type=%s items_type=%s count_type=%s",
+            type(payload).__name__, type(rows).__name__, type(total).__name__,
+        )
+        raise HTTPException(502, "VK вернул неподдерживаемый формат библиотеки; "
+                            "диагностика записана без токена и содержимого музыки")
+    return rows, total
+
+
 def _proxy() -> str | None:
     proxies = _value("music_proxy_urls", []) or _value("youtube_proxy_urls", [])
     return proxies[0] if isinstance(proxies, list) and proxies else None
@@ -1149,10 +1171,7 @@ async def vk_login(body: TokenBody, request: Request) -> dict[str, Any]:
             data={"access_token": token, "v": "5.199", "count": 1},
             headers=_vk_headers(),
         )
-    _vk_error(data)
-    payload = data.get("response")
-    if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
-        raise HTTPException(502, "VK не подтвердил доступ к аудиобиблиотеке")
+    _vk_audio_page(data)
     handle = _store("vk", token, expires_in=SESSION_TTL)
     library = await tracks("vk", request=request, x_music_session=handle)
     logging.getLogger("uvicorn.error").info(
@@ -1290,6 +1309,11 @@ def _vk_error(body: dict[str, Any]) -> None:
             raise HTTPException(401, "VK отклонил токен: он отозван, неполный или не подходит "
                                 "для сервера. Получите новую ссылку через кнопку входа "
                                 "с «доступом в любое время»")
+        if code == 3:
+            raise HTTPException(403, "VK не поддерживает музыкальный метод для этого "
+                                "приложения; повторное копирование токена не поможет")
+        if code == 8:
+            raise HTTPException(403, "VK заблокировал приложение, выдавшее токен")
         if code in {6, 9}:
             raise HTTPException(429, "Лимит VK; попробуйте позже", headers={"Retry-After": "10"})
         if code == 14:
@@ -1387,15 +1411,8 @@ async def tracks(
                 },
                 headers=_vk_headers(),
             )
-        _vk_error(body)
-        payload = body.get("response", {})
-        if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
-            raise HTTPException(502, "VK не подтвердил доступ к аудиобиблиотеке")
-        raw_items = payload["items"]
-        try:
-            more = offset + PAGE_SIZE < int(payload.get("count", 0))
-        except (TypeError, ValueError):
-            raise HTTPException(502, "Некорректный ответ VK") from None
+        raw_items, total = _vk_audio_page(body)
+        more = offset + PAGE_SIZE < total if total is not None else len(raw_items) >= PAGE_SIZE
     if not isinstance(raw_items, list):
         raise HTTPException(502, "Некорректный ответ музыкального сервиса")
     normalized = []

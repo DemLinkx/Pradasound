@@ -1174,3 +1174,56 @@ def test_vk_auth_reason_is_safe_and_distinguishes_expiry(message, subcode, expec
                                    "error_msg": message + " SECRET_PROVIDER_VALUE"}})
     assert expected in exc.value.detail
     assert "SECRET_PROVIDER_VALUE" not in exc.value.detail
+
+
+@pytest.mark.parametrize("payload,total", [
+    ({"count": 1, "items": [{"id": 2, "owner_id": 1}]}, 1),
+    ([1, {"id": 2, "owner_id": 1}], 1),
+    ([{"id": 2, "owner_id": 1}], None),
+    ([], None),
+    ([0], 0),
+])
+def test_vk_audio_accepts_object_and_legacy_list(payload, total):
+    rows, count = music._vk_audio_page({"response": payload})
+    assert count == total
+    assert all(isinstance(row, dict) for row in rows)
+
+
+@pytest.mark.parametrize("payload", [None, True, "private-data", {},
+    {"items": None}, {"items": [], "count": -1}, [1, "private-song"]])
+def test_vk_audio_rejects_bad_shapes_without_logging_payload(payload, caplog):
+    with pytest.raises(HTTPException) as exc:
+        music._vk_audio_page({"response": payload})
+    assert exc.value.status_code == 502
+    assert "private" not in caplog.text
+    assert "private" not in exc.value.detail
+
+
+@pytest.mark.parametrize("code", [3, 8, 5, 15])
+def test_vk_audio_never_turns_provider_error_into_empty_library(code):
+    with pytest.raises(HTTPException):
+        music._vk_audio_page({"error": {"error_code": code}})
+
+
+def test_vk_legacy_audio_pages_work_through_login_and_load_more(client, monkeypatch):
+    monkeypatch.setattr(music.settings, "vk_audio_enabled", True)
+
+    def handler(request):
+        data = parse_qs(request.content.decode())
+        offset = int(data.get("offset", ["0"])[0])
+        count = int(data["count"][0])
+        rows = [{"id": i + 1, "owner_id": 1, "title": "Song", "artist": "Artist"}
+                for i in range(offset, min(101, offset + count))]
+        return httpx.Response(200, json={"response": [101, *rows]})
+
+    monkeypatch.setattr(music, "_client", lambda proxy=None: httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), trust_env=False))
+    first = client.post("/api/music/vk/login", json={"token": "x" * 30})
+    assert first.status_code == 200
+    page = first.json()
+    assert len(page["tracks"]) == 50 and page["has_more"] is True
+    headers = {"X-Music-Session": page["session"]}
+    next_page = client.get("/api/music/vk/tracks?cursor=50", headers=headers).json()
+    assert len(next_page["tracks"]) == 50 and next_page["next_cursor"] == "100"
+    last = client.get("/api/music/vk/tracks?cursor=100", headers=headers).json()
+    assert len(last["tracks"]) == 1 and last["has_more"] is False
