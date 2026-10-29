@@ -48,6 +48,8 @@ def test_native_spotify_library_pages_without_web_api(client, monkeypatch):
                 {
                     "tracks": [{"id": "a" * 22, "title": "Private song", "artist": "Singer"}],
                     "cursor": "next-private-page" if len(received) == 1 else "",
+                    "account": "connected-account",
+                    "stats": {"pages": 3, "items": 100, "removed": 70, "other": 29},
                 }
             ).encode(), None
 
@@ -66,6 +68,8 @@ def test_native_spotify_library_pages_without_web_api(client, monkeypatch):
     assert first.json()["authenticated"] is True
     assert first.json()["tracks"][0]["title"] == "Private song"
     assert first.json()["next_cursor"] == "50"
+    assert first.json()["account_url"] == "https://open.spotify.com/user/connected-account"
+    assert first.json()["empty_library"] is False
     assert "access-secret" not in first.text and "next-private-page" not in first.text
     second = client.get("/api/music/spotify/tracks?cursor=50", headers={"X-Music-Session": handle})
     assert second.status_code == 200 and second.json()["has_more"] is False
@@ -123,6 +127,27 @@ def test_native_spotify_timeout_stops_reader(client, monkeypatch):
     monkeypatch.setattr(music.asyncio, "create_subprocess_exec", spawn)
     response = client.get("/api/music/spotify/tracks", headers={"X-Music-Session": handle})
     assert response.status_code == 502 and stopped == [True]
+
+
+def test_native_empty_library_is_explicit(client, monkeypatch):
+    monkeypatch.setenv("SPOTIFY_NATIVE_HELPER", "/reader")
+    handle = music._store("spotify", "access-secret", client_id=music.SPOTIFY_DEVICE_ID)
+
+    class Process:
+        returncode = 0
+
+        async def communicate(self, payload):
+            return b'{"tracks":[],"cursor":"","account":"owner","stats":{"context":true}}', None
+
+    async def spawn(*args, **kwargs):
+        return Process()
+
+    monkeypatch.setattr(music.asyncio, "create_subprocess_exec", spawn)
+    response = client.get("/api/music/spotify/tracks", headers={"X-Music-Session": handle})
+    assert response.status_code == 200
+    assert response.json()["empty_library"] is True
+    assert response.json()["has_more"] is False
+    assert response.json()["account_url"] == "https://open.spotify.com/user/owner"
 
 
 @pytest.fixture

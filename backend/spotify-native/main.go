@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 	"github.com/devgianlu/go-librespot/login5"
 	pbdata "github.com/devgianlu/go-librespot/proto/spotify/clienttoken/data/v0"
 	pbhttp "github.com/devgianlu/go-librespot/proto/spotify/clienttoken/http/v0"
+	collectionpb "github.com/devgianlu/go-librespot/proto/spotify/collection/v2"
 	extpb "github.com/devgianlu/go-librespot/proto/spotify/extendedmetadata"
 	credpb "github.com/devgianlu/go-librespot/proto/spotify/login5/v3/credentials"
 	metapb "github.com/devgianlu/go-librespot/proto/spotify/metadata"
@@ -39,9 +41,96 @@ type track struct {
 }
 
 type output struct {
-	Tracks []track `json:"tracks"`
-	Cursor string  `json:"cursor"`
-	Error  string  `json:"error,omitempty"`
+	Tracks  []track   `json:"tracks"`
+	Cursor  string    `json:"cursor"`
+	Error   string    `json:"error,omitempty"`
+	Account string    `json:"account,omitempty"`
+	Stats   scanStats `json:"stats"`
+}
+
+type scanStats struct {
+	Pages   int  `json:"pages"`
+	Items   int  `json:"items"`
+	Removed int  `json:"removed"`
+	Other   int  `json:"other"`
+	Unknown int  `json:"unknown"`
+	Context bool `json:"context"`
+}
+
+type collectionRead func(context.Context, string, string, string, int) (*collectionpb.PageResponse, error)
+
+func scanCollection(ctx context.Context, fetch collectionRead, username, cursor string) ([]string, string, scanStats, error) {
+	stats := scanStats{}
+	seen := map[string]bool{}
+	for stats.Pages < 50 {
+		if seen[cursor] {
+			return nil, "", stats, errors.New("pagination")
+		}
+		seen[cursor] = true
+		page, err := fetch(ctx, username, "collection", cursor, 50)
+		if err != nil {
+			return nil, "", stats, err
+		}
+		stats.Pages++
+		stats.Items += len(page.GetItems())
+		stats.Unknown += len(page.ProtoReflect().GetUnknown())
+		uris := []string{}
+		for _, item := range page.GetItems() {
+			if item.GetIsRemoved() {
+				stats.Removed++
+				continue
+			}
+			if strings.HasPrefix(item.GetUri(), "spotify:track:") {
+				uris = append(uris, item.GetUri())
+			} else {
+				stats.Other++
+			}
+		}
+		cursor = page.GetNextPageToken()
+		if len(uris) > 0 || cursor == "" {
+			return uris, cursor, stats, nil
+		}
+	}
+	return nil, "", stats, errors.New("pagination_limit")
+}
+
+func contextTracks(ctx context.Context, sp *spclient.Spclient, username string, offset int) ([]string, string, error) {
+	contextData, err := sp.ContextResolve(ctx, "spotify:user:"+username+":collection")
+	if err != nil {
+		return nil, "", err
+	}
+	resolver, err := spclient.NewContextResolver(ctx, &librespot.NullLogger{}, sp, contextData)
+	if err != nil {
+		return nil, "", err
+	}
+	uris := []string{}
+	position := 0
+	for page := 0; page < 10; page++ {
+		tracks, err := resolver.Page(ctx, page)
+		if errors.Is(err, io.EOF) {
+			return uris, "", nil
+		}
+		if err != nil {
+			return nil, "", err
+		}
+		for _, item := range tracks {
+			uri := item.GetUri()
+			if uri == "" && len(item.GetGid()) == 16 {
+				uri = "spotify:track:" + librespot.GidToBase62(item.GetGid())
+			}
+			if !strings.HasPrefix(uri, "spotify:track:") {
+				continue
+			}
+			if position >= offset {
+				if len(uris) == 50 {
+					return uris, "ctx:" + strconv.Itoa(offset+50), nil
+				}
+				uris = append(uris, uri)
+			}
+			position++
+		}
+	}
+	return nil, "", errors.New("context_limit")
 }
 
 func clientToken(ctx context.Context, client *http.Client, device string) (string, error) {
@@ -120,17 +209,29 @@ func read(ctx context.Context, in input) output {
 	if err != nil {
 		return fail("session")
 	}
-	page, err := sp.CollectionPage(ctx, accesspoint.Username(), "collection", in.Cursor, 50)
-	if err != nil {
-		return fail("collection")
-	}
-	uris := []string{}
-	for _, item := range page.GetItems() {
-		if !item.GetIsRemoved() && strings.HasPrefix(item.GetUri(), "spotify:track:") {
-			uris = append(uris, item.GetUri())
+	username := login.Username()
+	var uris []string
+	next := ""
+	stats := scanStats{}
+	if strings.HasPrefix(in.Cursor, "ctx:") {
+		offset, parseErr := strconv.Atoi(strings.TrimPrefix(in.Cursor, "ctx:"))
+		if parseErr != nil || offset < 0 || offset >= 500 {
+			return fail("input")
+		}
+		stats.Context = true
+		uris, next, err = contextTracks(ctx, sp, username, offset)
+	} else {
+		uris, next, stats, err = scanCollection(ctx, sp.CollectionPage, username, in.Cursor)
+		if err == nil && len(uris) == 0 && in.Cursor == "" {
+			stats.Context = true
+			uris, next, err = contextTracks(ctx, sp, username, 0)
 		}
 	}
-	result := output{Tracks: []track{}, Cursor: page.GetNextPageToken()}
+	result := output{Tracks: []track{}, Cursor: next, Account: username, Stats: stats}
+	if err != nil {
+		result.Error = "collection"
+		return result
+	}
 	if len(uris) == 0 {
 		return result
 	}

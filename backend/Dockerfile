@@ -3,8 +3,8 @@ FROM golang:1.25.5-bookworm AS spotify-reader
 WORKDIR /build
 COPY backend/spotify-native/go.mod backend/spotify-native/go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
-COPY backend/spotify-native/main.go ./
-RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /spotify-library .
+COPY backend/spotify-native/*.go ./
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=0 go test ./... && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /spotify-library .
 
 FROM python:3.12-slim-bookworm AS dependencies
 COPY --from=ghcr.io/astral-sh/uv:0.12.19 /uv /usr/local/bin/uv

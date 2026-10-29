@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from time import monotonic
 from typing import Any
-from urllib.parse import urlencode, urljoin, urlparse
+from urllib.parse import quote, urlencode, urljoin, urlparse
 
 import httpx
 import yt_dlp  # type: ignore[import-untyped]
@@ -546,6 +546,18 @@ async def _spotify_native_page(session: MusicSession, handle: str, cursor: str) 
                 await process.wait()
         if not isinstance(body, dict):
             raise HTTPException(502, "Некорректный ответ клиентской библиотеки Spotify")
+        stats = body.get("stats")
+        counts = [
+            min(100000, max(0, stats.get(key, 0)))
+            if isinstance(stats, dict) and type(stats.get(key)) is int
+            else 0
+            for key in ("pages", "items", "removed", "other", "unknown")
+        ]
+        logging.getLogger("uvicorn.error").info(
+            "spotify_native_scan pages=%d items=%d removed=%d other=%d unknown=%d context=%s",
+            *counts,
+            isinstance(stats, dict) and stats.get("context") is True,
+        )
         error = body.get("error")
         if error:
             stage = (
@@ -604,12 +616,19 @@ async def _spotify_native_page(session: MusicSession, handle: str, cursor: str) 
         more = bool(next_token) and next_offset < MAX_TRACKS
         if more:
             session.page_urls[str(next_offset)] = next_token
+        account = body.get("account")
         return {
             "session": handle,
             "authenticated": True,
             "tracks": normalized,
             "next_cursor": str(next_offset) if more else None,
             "has_more": more,
+            "empty_library": not normalized and not more,
+            **(
+                {"account_url": "https://open.spotify.com/user/" + quote(account, safe="")}
+                if isinstance(account, str) and 1 <= len(account) <= 128
+                else {}
+            ),
         }
 
 
