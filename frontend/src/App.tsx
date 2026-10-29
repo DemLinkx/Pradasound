@@ -35,14 +35,15 @@ function yandexPage(value: unknown) {
 }
 type YandexLogin = { login_id: string; verification_url: string; user_code: string; interval: number; expires_in: number };
 type QueueItem = { id: string; track_id: string; owner_id: string; access_revision?: number; canonical_url?: string; duration_ms?: number };
-type PlaybackSync = { item_id: string; revision: number; position: number; duration: number; paused: boolean; server_time: number; serial: number };
+type PlaybackSync = { item_id: string; revision: number; position: number; duration: number; paused: boolean; server_time: number; serial: number; transport_serial?: number };
 function playbackSnapshot(value: unknown): PlaybackSync | null {
   if (!value || typeof value !== 'object') return null;
   const s = value as Partial<PlaybackSync>;
   return typeof s.item_id === 'string' && /^[a-f0-9]{32}$/.test(s.item_id) &&
     Number.isSafeInteger(s.revision) && s.revision! >= 0 && Number.isSafeInteger(s.serial) && s.serial! >= 0 &&
     typeof s.paused === 'boolean' && typeof s.position === 'number' && s.position >= 0 && s.position <= 86400 &&
-    typeof s.duration === 'number' && s.duration >= 0 && s.duration <= 86400 && Number.isFinite(s.server_time)
+    typeof s.duration === 'number' && s.duration >= 0 && s.duration <= 86400 && Number.isFinite(s.server_time) &&
+    (s.transport_serial === undefined || Number.isSafeInteger(s.transport_serial) && s.transport_serial >= 0)
     ? s as PlaybackSync : null;
 }
 function listeningPosition(s: PlaybackSync, serverNow: number) {
@@ -418,6 +419,7 @@ export default function App() {
   const remoteRef = useRef(remotePlayback); remoteRef.current = remotePlayback;
   const localPause = useRef(listenPaused); localPause.current = listenPaused;
   const listenerError = useRef('');
+  const listenerApplied = useRef('');
   const [volume, setVolume] = useState(80);
   const volumeRef = useRef(0.8);
   const previousVolume = useRef(80);
@@ -1013,7 +1015,7 @@ export default function App() {
         videoId: fallbackId, width: 220, height: 200,
         playerVars: { autoplay: session?.role === 'Main' ? 1 : 0, playsinline: 1, controls: 0, origin: location.origin },
         events: {
-          onReady: (event) => { if (active) { ytPlayer.current = event.target; event.target.setVolume(volumeRef.current * 100); if (session?.role === 'Main') event.target.playVideo(); } },
+          onReady: (event) => { if (active) { ytPlayer.current = event.target; event.target.setVolume(volumeRef.current * 100); if (session?.role === 'Main') event.target.playVideo(); else syncListener(); } },
           onStateChange: (event) => {
             if (!active) return;
             if (event.data === 1) { clearTimeout(startupTimer); setPlayingKey(currentKey); }
@@ -1081,12 +1083,12 @@ export default function App() {
     if (session?.role !== 'Main' || !currentItem || status !== 'connected' || socket.current?.readyState !== WebSocket.OPEN) return;
     const state = localPlayback();
     socket.current.send(JSON.stringify({ action: 'playback_sync', item_id: currentItem.id, expected_revision: playbackRevision,
-      position: Math.max(0, Math.min(86400, position ?? state.position)), duration: Math.max(0, Math.min(86400, state.duration)), paused: state.paused }));
+      position: Math.max(0, Math.min(86400, position ?? state.position)), duration: Math.max(0, Math.min(86400, state.duration)), paused: state.paused, seek: position !== undefined }));
   }
 
   useEffect(() => {
     if (session?.role !== 'Main' || status !== 'connected' || !currentItem) return;
-    publishHostPlayback(); const timer = setInterval(() => publishHostPlayback(), 2000);
+    publishHostPlayback(); const timer = setInterval(() => publishHostPlayback(), 10000);
     return () => clearInterval(timer);
   }, [currentKey, playingKey, audioUrl, fallbackId, session?.role, status]);
 
@@ -1094,6 +1096,8 @@ export default function App() {
     if (session?.role !== 'Member' || !playbackDevice || !listenWanted.current || listenerError.current && !force) return;
     const snapshot = remoteRef.current;
     if (!snapshot || snapshot.item_id !== currentItem?.id || snapshot.revision !== playbackRevision) return;
+    const command = `${currentKey}:${listenerToken}:${streamAttempt}:${fallbackId}:${snapshot.transport_serial ?? snapshot.paused}`;
+    if (!force && listenerApplied.current === command) return;
     const target = listeningPosition(snapshot, Date.now() + clockOffset.current);
     const paused = snapshot.paused || localPause.current || snapshot.duration > 0 && target >= snapshot.duration - .05;
     const actual = localPlayback();
@@ -1101,21 +1105,23 @@ export default function App() {
       if (isSpotify) {
         const player = spotifyPlayer.current;
         if (!player || !spotifyReady) return;
-        if (Math.abs(actual.position - target) > 1.2) player.seek(Math.floor(target));
+        listenerApplied.current = command;
+        if (Math.abs(actual.position - target) > .5) player.seek(Math.floor(target));
         if (paused) { if (!actual.paused) player.pause(); }
         else if (actual.paused) player.play();
       } else if (fallbackId === currentTrack) {
         const player = ytPlayer.current;
         if (!player || typeof player.getCurrentTime !== 'function') return;
-        if (Math.abs(actual.position - target) > 1.2) player.seekTo(target, true);
+        listenerApplied.current = command;
+        if (Math.abs(actual.position - target) > .5) player.seekTo(target, true);
         if (paused) { if (!actual.paused) player.pauseVideo(); }
         else if (actual.paused) player.playVideo();
       } else {
         const player = audioPlayers[activeAudioRef.current].current;
         if (!player || player.readyState < HTMLMediaElement.HAVE_METADATA || slotKeys.current[activeAudioRef.current] !== currentKey) return;
-        const difference = target - player.currentTime;
-        if (Math.abs(difference) > 1.2) { player.currentTime = target; player.playbackRate = 1; }
-        else player.playbackRate = paused || Math.abs(difference) < .15 ? 1 : Math.max(.97, Math.min(1.03, 1 + difference * .025));
+        listenerApplied.current = command;
+        if (Math.abs(target - player.currentTime) > .5) player.currentTime = target;
+        player.playbackRate = 1;
         if (paused) { if (!player.paused) player.pause(); }
         else if (player.paused) void player.play().catch(() => {
           if (listenWanted.current && slotKeys.current[activeAudioRef.current] === currentKey) {
@@ -1128,15 +1134,12 @@ export default function App() {
 
   useEffect(() => {
     if (session?.role !== 'Member' || !playbackDevice) return;
-    syncListener(); const timer = setInterval(() => syncListener(), 1000);
-    const resume = () => { if (document.visibilityState === 'visible') syncListener(); };
-    document.addEventListener('visibilitychange', resume);
-    return () => { clearInterval(timer); document.removeEventListener('visibilitychange', resume); };
+    syncListener();
   }, [currentKey, playbackDevice, remotePlayback, audioUrl, spotifyReady, fallbackId, playingKey, listenPaused, audioError]);
 
   function toggleListenTogether() {
     const enabled = !listenTogether;
-    listenWanted.current = enabled; localPause.current = false;
+    listenWanted.current = enabled; localPause.current = false; listenerApplied.current = '';
     setListenPaused(false); setAudioError(''); listenerError.current = '';
     if (!enabled) {
       audioPlayers.forEach((ref) => ref.current?.pause());
@@ -1636,7 +1639,7 @@ export default function App() {
         {session.role === 'Member' && <section className="card cardpad">
           <div className="sectionhead"><div><span className="eyebrow">СЛУШАТЬ ВМЕСТЕ</span><h3>{listenTogether ? 'Музыка на вашем устройстве' : 'Сейчас звук только у хоста'}</h3></div>
             <button className={`button ${listenTogether ? '' : 'primary'}`} disabled={status !== 'connected'} onClick={toggleListenTogether}>{listenTogether ? 'Выключить у себя' : 'Слушать вместе'}</button></div>
-          <p className="muted small">{listenTogether ? status !== 'connected' ? 'Восстанавливаем соединение. Звук приостановлен.' : !hostOnline ? 'Ждём подключения хоста.' : listenPaused ? 'У вас пауза. Нажмите ▶, чтобы продолжить вместе с хостом.' : 'Следуем за хостом: общая песня, пауза и перемотка. Возможна небольшая задержка.' : 'Включите звук в своих наушниках, сохранив общую очередь.'}</p>
+          <p className="muted small">{listenTogether ? status !== 'connected' ? 'Восстанавливаем соединение. Звук приостановлен.' : !hostOnline ? 'Ждём подключения хоста.' : listenPaused ? 'У вас пауза. Нажмите ▶, чтобы продолжить вместе с хостом.' : 'Общая песня, пауза и перемотка. Во время песни позиция не подстраивается — возможна небольшая задержка.' : 'Включите звук в своих наушниках, сохранив общую очередь.'}</p>
           {listenTogether && isSpotify && <p className="muted small">Для оригиналов Spotify нужен собственный доступ к полным трекам в этом браузере. Вход хоста не передаётся гостям.</p>}
         </section>}
         {session.role === 'Member' && !listenTogether && <section className="card cardpad hero">

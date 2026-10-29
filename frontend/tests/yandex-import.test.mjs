@@ -95,3 +95,68 @@ test('invalid playback snapshots cannot seek or poison the listening clock', () 
   assert.equal(playbackSnapshot({ ...snapshot, server_time: Infinity }), null);
   assert.equal(playbackSnapshot({ ...snapshot, revision: 1.5 }), null);
 });
+
+function listenerHarness() {
+  const player = { readyState: 4, paused: true, playbackRate: 1, seeks: 0, plays: 0, pauses: 0, position: 0,
+    get currentTime() { return this.position; },
+    set currentTime(value) { this.position = value; this.seeks++; },
+    play() { this.plays++; this.paused = false; return Promise.resolve(); },
+    pause() { this.pauses++; this.paused = true; } };
+  const snapshot = { item_id: 'a'.repeat(32), revision: 0, serial: 1, transport_serial: 1,
+    position: 46, duration: 180, paused: false, server_time: Date.now() };
+  const context = { session: { role: 'Member' }, playbackDevice: true, listenWanted: { current: true },
+    listenerError: { current: '' }, remoteRef: { current: snapshot }, currentItem: { id: snapshot.item_id },
+    playbackRevision: 0, currentKey: 'track:0', listenerToken: 'private-listener', streamAttempt: 0,
+    fallbackId: '', currentTrack: 'track', listenerApplied: { current: '' }, clockOffset: { current: 0 },
+    localPause: { current: false }, isSpotify: false, audioPlayers: [{ current: player }],
+    activeAudioRef: { current: 0 }, slotKeys: { current: ['track:0', ''] },
+    HTMLMediaElement: { HAVE_METADATA: 1 }, listeningPosition,
+    localPlayback: () => ({ position: player.currentTime, paused: player.paused }),
+    setAudioError: (error) => { throw Error(error); } };
+  const start = source.indexOf('function syncListener(');
+  const end = source.indexOf('\n  }\n', start) + 5;
+  const sync = new Script(`${stripTypeScriptTypes(source.slice(start, end))}; syncListener`).runInNewContext(context);
+  return { player, snapshot, context, sync };
+}
+
+test('guest starts once and ignores heartbeat drift without changing tempo', () => {
+  const { player, snapshot, sync } = listenerHarness();
+  sync();
+  assert.equal(player.seeks, 1);
+  assert.equal(player.plays, 1);
+  for (let i = 0; i < 30; i++) {
+    snapshot.serial++; snapshot.position = 60 + i * 2;
+    sync();
+  }
+  assert.equal(player.seeks, 1);
+  assert.equal(player.plays, 1);
+  assert.equal(player.playbackRate, 1);
+  // A local buffering pause is left to the media element, not repeatedly restarted.
+  player.paused = true; sync();
+  assert.equal(player.plays, 1);
+});
+
+test('explicit host seek, pause and resume are applied once per command', () => {
+  const { player, snapshot, sync } = listenerHarness();
+  sync();
+  snapshot.transport_serial++; snapshot.position = 100; sync();
+  assert.ok(Math.abs(player.currentTime - 100) < .1);
+  assert.equal(player.seeks, 2);
+  snapshot.transport_serial++; snapshot.paused = true; sync(); sync();
+  assert.equal(player.pauses, 1);
+  snapshot.transport_serial++; snapshot.paused = false; sync(); sync();
+  assert.equal(player.plays, 2);
+});
+
+test('unready audio waits to align; explicit guest resume can align again', () => {
+  const { player, snapshot, context, sync } = listenerHarness();
+  player.readyState = 0; sync();
+  assert.equal(context.listenerApplied.current, '');
+  player.readyState = 4; snapshot.position = 48; sync();
+  assert.equal(player.seeks, 1);
+  context.localPause.current = true; sync(true);
+  assert.equal(player.pauses, 1);
+  context.localPause.current = false; snapshot.position = 75; sync(true);
+  assert.equal(player.seeks, 2);
+  assert.equal(player.plays, 2);
+});

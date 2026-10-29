@@ -175,3 +175,37 @@ def test_yandex_listener_uses_author_access_without_exposing_tokens(monkeypatch)
         assert (
             "private-author-handle" not in response.text and room["host_token"] not in response.text
         )
+
+
+def test_heartbeats_keep_transport_command_but_seek_and_pause_change_it(monkeypatch):
+    from itertools import count
+
+    from app.api import lobby
+
+    ticks = count(100, .1)
+    monkeypatch.setattr(lobby, "monotonic", lambda: next(ticks))
+    with party() as (_, _, host, guest, state):
+        guest.send_json({"action": "listen_together", "enabled": True})
+        guest.receive_json()
+        command = {
+            "action": "playback_sync",
+            "item_id": state["queue_items"][0]["id"],
+            "expected_revision": state["playback_revision"],
+            "position": 46,
+            "duration": 180,
+            "paused": False,
+        }
+        host.send_json(command)
+        initial = guest.receive_json()
+        host.send_json({**command, "position": 56})
+        heartbeat = guest.receive_json()
+        assert heartbeat["serial"] > initial["serial"]
+        assert heartbeat["transport_serial"] == initial["transport_serial"]
+        host.send_json({**command, "position": 100, "seek": True})
+        seek = guest.receive_json()
+        assert seek["transport_serial"] > heartbeat["transport_serial"]
+        host.send_json({**command, "position": 100, "paused": True})
+        paused = guest.receive_json()
+        assert paused["transport_serial"] > seek["transport_serial"]
+        host.send_json({**command, "position": 100, "paused": True})
+        assert guest.receive_json()["transport_serial"] == paused["transport_serial"]

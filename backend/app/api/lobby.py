@@ -512,7 +512,10 @@ async def lobby_ws(ws: WebSocket, lobby_id: str) -> None:
                         not 0 <= duration <= 86400):
                     await manager.send(ws, {"type": "error", "error": "stale_playback_sync"})
                     continue
-                if monotonic() - lobby.last_sync < .05:
+                previous = playback_snapshot(lobby)
+                control = (previous is None or previous["paused"] != message["paused"] or
+                           message.get("seek") is True)
+                if not control and monotonic() - lobby.last_sync < .05:
                     continue
                 lobby.last_sync = monotonic()
                 lobby.sync_serial += 1
@@ -520,7 +523,9 @@ async def lobby_ws(ws: WebSocket, lobby_id: str) -> None:
                                   "revision": lobby.playback_revision,
                                   "position": position, "duration": duration,
                                   "paused": message["paused"], "server_time": time() * 1000,
-                                  "serial": lobby.sync_serial}
+                                  "serial": lobby.sync_serial,
+                                  "transport_serial": lobby.sync_serial if control else
+                                  previous.get("transport_serial", previous["serial"])}
                 await manager.sync_listeners(lobby_id)
                 continue
             elif message.get("action") == "add_track":
