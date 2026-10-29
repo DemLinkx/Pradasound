@@ -457,7 +457,8 @@ def _spotify_embed_tracks(html: str) -> list[dict[str, object]]:
                 "artist": artist[:200] if isinstance(artist, str) else "",
                 "canonical_url": f"https://open.spotify.com/track/{track_id}",
                 "playable": playable,
-                "reason": "Для Spotify воспроизведение через найденное видео YouTube"
+                "duration_ms": raw.get("duration") if type(raw.get("duration")) is int else 0,
+                "reason": "Оригинал через плеер Spotify; подбор YouTube по выбору"
                 if playable
                 else "Трек Spotify недоступен",
             }
@@ -606,7 +607,8 @@ async def _spotify_native_page(session: MusicSession, handle: str, cursor: str) 
                 "artist": artist[:200] if isinstance(artist, str) else "",
                 "canonical_url": f"https://open.spotify.com/track/{identifier}",
                 "playable": True,
-                "reason": "Воспроизведение через найденное видео YouTube",
+                "duration_ms": raw.get("duration_ms") if type(raw.get("duration_ms")) is int else 0,
+                "reason": "Оригинал через плеер Spotify; подбор YouTube по выбору",
             }
             session.imported[identifier] = item
             normalized.append(item)
@@ -703,7 +705,7 @@ def _track(provider: str, raw: dict[str, Any]) -> dict[str, object] | None:
         canonical = f"https://open.spotify.com/track/{identifier}"
         playable = not raw.get("is_local", False)
         reason = (
-            "Для Spotify воспроизведение через найденное видео YouTube"
+            "Оригинал через плеер Spotify; подбор YouTube по выбору"
             if playable
             else "Локальный трек Spotify недоступен"
         )
@@ -752,6 +754,11 @@ def _track(provider: str, raw: dict[str, Any]) -> dict[str, object] | None:
         "canonical_url": canonical,
         "playable": playable,
         "reason": reason,
+        **(
+            {"duration_ms": raw["duration_ms"]}
+            if provider == "spotify" and type(raw.get("duration_ms")) is int
+            else {}
+        ),
     }
 
 

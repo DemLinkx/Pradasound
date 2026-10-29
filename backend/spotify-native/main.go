@@ -35,9 +35,10 @@ type input struct {
 }
 
 type track struct {
-	ID     string `json:"id"`
-	Title  string `json:"title"`
-	Artist string `json:"artist"`
+	ID       string `json:"id"`
+	Title    string `json:"title"`
+	Artist   string `json:"artist"`
+	Duration int32  `json:"duration_ms"`
 }
 
 type output struct {
@@ -264,7 +265,7 @@ func read(ctx context.Context, in input) output {
 					artists = append(artists, artist.GetName())
 				}
 			}
-			found[entity.GetEntityUri()] = track{ID: strings.TrimPrefix(entity.GetEntityUri(), "spotify:track:"), Title: info.GetName(), Artist: strings.Join(artists, ", ")}
+			found[entity.GetEntityUri()] = track{ID: strings.TrimPrefix(entity.GetEntityUri(), "spotify:track:"), Title: info.GetName(), Artist: strings.Join(artists, ", "), Duration: info.GetDuration()}
 		}
 	}
 	for _, uri := range uris {

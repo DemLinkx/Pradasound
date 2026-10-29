@@ -34,7 +34,7 @@ function yandexPage(value: unknown) {
   };
 }
 type YandexLogin = { login_id: string; verification_url: string; user_code: string; interval: number; expires_in: number };
-type QueueItem = { id: string; track_id: string; owner_id: string; access_revision?: number; canonical_url?: string };
+type QueueItem = { id: string; track_id: string; owner_id: string; access_revision?: number; canonical_url?: string; duration_ms?: number };
 type MusicProvider = 'spotify' | 'soundcloud' | 'vk';
 type MusicTrack = { id: string; title: string; artist: string; canonical_url: string; playable: boolean; reason?: string };
 type MusicLibrary = { session: string; authenticated: boolean; tracks: MusicTrack[]; next_cursor: string | null; has_more: boolean; library_error?: string; library_error_status?: number; retry_after?: number; quota_reason?: string; import_notice?: string; empty_library?: boolean; account_url?: string };
@@ -42,7 +42,7 @@ type MusicCapability = { oauth: boolean; public_import: boolean; device_login?: 
 type MusicDeviceLogin = YandexLogin & { provider: MusicProvider };
 const MUSIC_LABELS: Record<MusicProvider, string> = { spotify: 'Spotify', soundcloud: 'SoundCloud', vk: 'VK Музыка' };
 const MUSIC_KEY = 'prada-sound-music';
-function sourceName(id?: string) { return id?.startsWith('yandex_') ? 'Яндекс Музыка' : id?.startsWith('sc_') ? 'SoundCloud' : id?.startsWith('vk_') ? 'VK Музыка' : 'YouTube'; }
+function sourceName(id?: string) { return id?.startsWith('yandex_') ? 'Яндекс Музыка' : id?.startsWith('spotify_') ? 'Spotify' : id?.startsWith('sc_') ? 'SoundCloud' : id?.startsWith('vk_') ? 'VK Музыка' : 'YouTube'; }
 function vkAccessToken(input: string) {
   let token = input.trim();
   if (/^https?:\/\//i.test(token)) {
@@ -84,7 +84,7 @@ type YtApi = { Player: new (element: HTMLElement, options: {
 const STORAGE_KEY = 'prada-sound-lobby';
 const YANDEX_KEY = 'prada-sound-yandex';
 const VIDEO_ID = /^[A-Za-z0-9_-]{11}$/;
-const QUEUE_ID = /^(?:yandex_[0-9]{1,20}|sc_[0-9]{1,20}|vk_-?[0-9]{1,20}_[0-9]{1,20}|[A-Za-z0-9_-]{11})$/;
+const QUEUE_ID = /^(?:yandex_[0-9]{1,20}|sc_[0-9]{1,20}|spotify_[A-Za-z0-9]{22}|vk_-?[0-9]{1,20}_[0-9]{1,20}|[A-Za-z0-9_-]{11})$/;
 const guestTokens = new Map<string, string>();
 function memberToken(lobbyId: string) {
   const key = `prada-sound-member-${lobbyId}`;
@@ -97,6 +97,32 @@ function memberToken(lobbyId: string) {
   return token;
 }
 let ytApiPromise: Promise<YtApi> | null = null;
+type SpotifyUpdate = { playingURI?: string; isPaused?: boolean; isBuffering?: boolean; duration?: number; position?: number; isPreview?: boolean };
+type SpotifyProgress = { position: number; duration: number; started: boolean };
+type SpotifyController = { play: () => void; pause: () => void; togglePlay: () => void; seek: (seconds: number) => void;
+  destroy: () => void; addListener: (event: string, listener: (event: { data: SpotifyUpdate }) => void) => void };
+type SpotifyEmbedApi = { createController: (element: HTMLElement, options: { uri: string; width: string; height: number }, callback: (controller: SpotifyController) => void) => void };
+let spotifyApiPromise: Promise<SpotifyEmbedApi> | null = null;
+function spotifyEmbedApi(): Promise<SpotifyEmbedApi> {
+  const browser = window as Window & { pradaSpotifyApi?: SpotifyEmbedApi; onSpotifyIframeApiReady?: (api: SpotifyEmbedApi) => void };
+  if (browser.pradaSpotifyApi) return Promise.resolve(browser.pradaSpotifyApi);
+  return spotifyApiPromise ||= new Promise<SpotifyEmbedApi>((resolve, reject) => {
+    const timer = window.setTimeout(() => reject(new Error('Плеер Spotify не загрузился. Проверьте доступ к Spotify в браузере хоста.')), 15000);
+    browser.onSpotifyIframeApiReady = (api) => { browser.pradaSpotifyApi = api; clearTimeout(timer); resolve(api); };
+    const script = document.createElement('script'); script.src = 'https://open.spotify.com/embed/iframe-api/v1'; script.async = true;
+    script.onerror = () => { clearTimeout(timer); reject(new Error('Spotify недоступен в этом браузере.')); };
+    document.head.append(script);
+  }).catch((error) => { spotifyApiPromise = null; throw error; });
+}
+function spotifyPlayback(data: SpotifyUpdate, previous: SpotifyProgress, expectedDuration = 0) {
+  const duration = Number.isFinite(data.duration) ? Math.max(0, data.duration!) : previous.duration;
+  const position = Number.isFinite(data.position) ? Math.max(0, data.position!) : previous.position;
+  const playing = data.isPaused === false && data.isBuffering !== true;
+  const preview = data.isPreview === true || expectedDuration > 45000 && duration > 0 && duration <= 31000 && expectedDuration > duration + 10000;
+  const ended = !preview && previous.started && data.isPaused === true && data.isBuffering !== true && duration > 0 &&
+    (position >= duration - 100 || position < 1000 && previous.position > 1000 && previous.position >= duration - 1500);
+  return { duration, position, started: previous.started || playing, playing, preview, ended };
+}
 function youtubeApi(): Promise<YtApi> {
   const browser = window as Window & { YT?: YtApi; onYouTubeIframeAPIReady?: () => void };
   if (browser.YT?.Player) return Promise.resolve(browser.YT);
@@ -384,6 +410,9 @@ export default function App() {
   const skipSent = useRef('');
   const ytMount = useRef<HTMLDivElement>(null);
   const ytPlayer = useRef<YtPlayer | null>(null);
+  const spotifyMount = useRef<HTMLDivElement>(null);
+  const spotifyPlayer = useRef<SpotifyController | null>(null);
+  const [spotifyReady, setSpotifyReady] = useState(false);
   const preparedAudio = useRef(new Map<string, { promise: Promise<string>; expiresAt: number }>());
   const audioRetryKey = useRef('');
   const retryCount = useRef(0);
@@ -676,6 +705,7 @@ export default function App() {
 
   const currentItem = queueItems[0];
   const currentTrack = currentItem?.track_id;
+  const isSpotify = currentTrack?.startsWith('spotify_') === true;
   const currentKey = `${playbackRevision}:${currentItem?.id}`;
   const nextItem = queueItems[1];
   const nextTrack = nextItem?.track_id;
@@ -685,6 +715,7 @@ export default function App() {
     ? `${nextItem.id}:${nextItem.access_revision || 0}` : session?.host_token;
   const audioCacheKey = (item: QueueItem) => `${item.id}:${item.access_revision || 0}`;
   async function resolveAudio(item: QueueItem, signal: AbortSignal): Promise<string> {
+    if (item.track_id.startsWith('spotify_')) throw new Error('Оригинал Spotify воспроизводится в его встроенном плеере.');
     const yandex = item.track_id.startsWith('yandex_');
     const music = item.track_id.startsWith('sc_') || item.track_id.startsWith('vk_');
     if (!session?.host_token || !session.lobby_id) throw new Error('Нет доступа хоста к воспроизведению.');
@@ -771,7 +802,7 @@ export default function App() {
     setAudioUrl('');
     setAudioError('');
     setFallbackId('');
-    if (session?.role !== 'Main' || !currentItem) return;
+    if (session?.role !== 'Main' || !currentItem || isSpotify) return;
     const controller = new AbortController();
     void (async () => {
       try {
@@ -815,7 +846,7 @@ export default function App() {
     if (player) player.volume = 0;
     slotKeys.current[slot] = '';
     preloaded.current = null;
-    if (!nextItem) return;
+    if (!nextItem || nextItem.track_id.startsWith('spotify_')) return;
     void (async () => {
       try {
         const url = await prepareAudio(nextItem);
@@ -842,6 +873,61 @@ export default function App() {
     })();
     return () => { active = false; };
   }, [queueItems, session?.role, currentKey, audioUrl, playingKey]);
+
+  useEffect(() => {
+    setSpotifyReady(false);
+    if (!isSpotify || session?.role !== 'Main' || !currentItem || !spotifyMount.current) return;
+    let active = true;
+    let controller: SpotifyController | null = null;
+    let progress: SpotifyProgress = { position: 0, duration: 0, started: false };
+    let preview = false;
+    const uri = `spotify:track:${currentItem.track_id.slice(8)}`;
+    const mount = spotifyMount.current;
+    const child = document.createElement('div'); mount.replaceChildren(child);
+    void spotifyEmbedApi().then((api) => {
+      if (!active) return;
+      api.createController(child, { uri, width: '100%', height: 352 }, (player) => {
+        if (!active) { player.destroy(); return; }
+        controller = player; spotifyPlayer.current = player;
+        player.addListener('error', () => {
+          if (active) { setPlayingKey(''); setAudioError('Spotify не смог запустить трек. Проверьте вход в его плеере и доступность Spotify в браузере хоста.'); }
+        });
+        player.addListener('ready', () => {
+          if (!active) return;
+          setSpotifyReady(true);
+          if (volumeRef.current > 0) try { player.play(); } catch { setAudioError('Нажмите ▶ в плеере Spotify, чтобы начать.'); }
+        });
+        player.addListener('playback_update', ({ data }) => {
+          if (!active || !data) return;
+          if (data.playingURI && data.playingURI !== uri) {
+            if (data.isPaused === false) player.pause(); setPlayingKey('');
+            if (!preview && progress.started && progress.duration > 0 && progress.position >= progress.duration - 1500) skipTrack();
+            else setAudioError('Spotify переключил запись вне очереди. Нажмите ▶ для повторного запуска или выберите следующий трек.');
+            return;
+          }
+          const next = spotifyPlayback(data, progress, currentItem.duration_ms);
+          const newPreview = !preview && next.preview;
+          preview ||= next.preview;
+          if (preview) {
+            if (newPreview || data.isPaused === false) player.pause(); setPlayingKey('');
+            setAudioError('Spotify предоставил только превью. Для полного трека войдите в Spotify в браузере хоста с Premium. Можно также выбрать подбор через YouTube.');
+            return;
+          }
+          progress = next;
+          setPlaybackDuration(next.duration / 1000); setPlaybackTime(next.position / 1000);
+          setPlayingKey(next.playing ? currentKey : '');
+          if (next.playing) setAudioError('');
+          if (next.ended) skipTrack();
+        });
+      });
+    }).catch((cause) => { if (active) setAudioError(cause instanceof Error ? cause.message : 'Не удалось открыть Spotify.'); });
+    return () => {
+      active = false;
+      try { controller?.pause(); controller?.destroy(); } catch {}
+      if (spotifyPlayer.current === controller) spotifyPlayer.current = null;
+      mount.replaceChildren();
+    };
+  }, [currentKey, session?.role, session?.lobby_id, streamAttempt]);
 
   useEffect(() => {
     if (!fallbackId || fallbackId !== currentTrack || session?.role !== 'Main' || !ytMount.current) return;
@@ -1054,7 +1140,7 @@ export default function App() {
     const provider = musicProvider; const library = musicLibraries[provider];
     if (!library || !track.playable) return;
     if (provider !== 'spotify') { enqueue(`${provider === 'soundcloud' ? 'sc' : 'vk'}_${track.id}`, `${track.title} — ${track.artist}`, library.session); return; }
-    if (!spotifyConsent) { setMusicError('Подтвердите воспроизведение найденной записи через YouTube.'); return; }
+    if (!spotifyConsent) { enqueue(`spotify_${track.id}`, `${track.title} — ${track.artist}`, library.session); return; }
     const lobbyId = session?.lobby_id;
     void musicOperationRequest(async (signal) => {
       const response = await fetch('/api/music/spotify/resolve', { method: 'POST', signal, headers: { 'Content-Type': 'application/json' },
@@ -1243,6 +1329,7 @@ export default function App() {
   function togglePlayback() {
     if (!currentTrack || session?.role !== 'Main') return;
     setAudioError('');
+    if (isSpotify) { spotifyPlayer.current?.togglePlay(); return; }
     if (fallbackId === currentTrack) {
       if (playingKey === currentKey) ytPlayer.current?.pauseVideo();
       else ytPlayer.current?.playVideo();
@@ -1265,7 +1352,8 @@ export default function App() {
     if (!currentTrack || !playbackDuration) return;
     const target = Math.max(0, Math.min(seconds, playbackDuration));
     setPlaybackTime(target);
-    if (fallbackId === currentTrack) ytPlayer.current?.seekTo(target, true);
+    if (isSpotify) spotifyPlayer.current?.seek(Math.floor(target));
+    else if (fallbackId === currentTrack) ytPlayer.current?.seekTo(target, true);
     else {
       const current = audioPlayers[activeAudioRef.current].current;
       if (current && Number.isFinite(current.duration)) current.currentTime = target;
@@ -1391,8 +1479,8 @@ export default function App() {
               {currentTrack ? <div className="bars" aria-hidden="true">{Array.from({ length: 20 }, (_, i) => <i key={i} />)}</div> :
                 <button className="button tiny stage-add" onClick={() => document.getElementById('add-track')?.scrollIntoView({ behavior: 'smooth', block: 'center' })}>Добавить трек ↓</button>}
             </div>
-            <div className="miniPlayer">
-              {fallbackId === currentTrack && currentTrack ? <div key={currentKey} ref={ytMount} className="fallbackVideo" /> :
+            <div className="miniPlayer" style={isSpotify ? { minHeight: 352, aspectRatio: 'auto' } : undefined}>
+              {isSpotify ? <div ref={spotifyMount} style={{ width: '100%', minHeight: 352 }} /> : fallbackId === currentTrack && currentTrack ? <div key={currentKey} ref={ytMount} className="fallbackVideo" /> :
               <div className={`spectrum ${currentTrack && playingKey === currentKey ? '' : 'idle'}`} aria-label="Аудиовизуализатор">
                 {Array.from({ length: 17 }, (_, i) => <i key={i} style={{ '--n': i } as CSSProperties} />)}
               </div>}
@@ -1408,7 +1496,7 @@ export default function App() {
           </div>
           <div className="deck-controls">
             <button className="deck-play" aria-label={playingKey === currentKey ? 'Пауза' : 'Воспроизвести'}
-              disabled={!currentTrack || (!audioUrl && fallbackId !== currentTrack)} onClick={togglePlayback}>
+              disabled={!currentTrack || (isSpotify ? !spotifyReady : !audioUrl && fallbackId !== currentTrack)} onClick={togglePlayback}>
               {playingKey === currentKey && currentTrack ? <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="4" width="4" height="16" rx="1" /><rect x="14" y="4" width="4" height="16" rx="1" /></svg> :
                 <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 4.7a1 1 0 0 1 1.5-.86l11 7.3a1 1 0 0 1 0 1.72l-11 7.3A1 1 0 0 1 8 19.3z" /></svg>}
             </button>
@@ -1423,7 +1511,7 @@ export default function App() {
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m5 5 10 7L5 19V5Z" /><path d="M19 5v14" /></svg>
             </button>
             <span className="deck-next-label">Следующий трек</span>
-            <div className="deck-volume">
+            {!isSpotify && <div className="deck-volume">
               <button className="deck-volume-icon" aria-label={volume === 0 ? 'Включить звук' : 'Выключить звук'}
                 onClick={() => setPlayerVolume(volume === 0 ? previousVolume.current : 0)}>
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M4 9v6h4l5 4V5L8 9H4Z" />{volume > 0 && <path d="M16 9a4 4 0 0 1 0 6" />}{volume > 50 && <path d="M18.5 5.5a9 9 0 0 1 0 13" />}</svg>
@@ -1432,7 +1520,7 @@ export default function App() {
                 style={{ '--fill': `${volume}%` } as CSSProperties} aria-label="Громкость"
                 onChange={(event) => setPlayerVolume(Number(event.target.value))} />
               <span>{volume}%</span>
-            </div>
+            </div>}
           </div>
           {[0, 1].map((slot) => <audio key={slot} ref={audioPlayers[slot]} preload="auto"
             style={{ display: 'none' }}
@@ -1463,6 +1551,7 @@ export default function App() {
               }
             } }} />)}
           <div className="deck-message">{currentTrack ? <>
+            {isSpotify && <p className="muted small">Воспроизведение оригинала через Spotify в браузере хоста. Полный доступ может требовать входа в его плеере и Premium. Громкость регулируется в Spotify или на устройстве; переход к следующему треку — без мешапа.</p>}
             {fallbackId === currentTrack && <p className="muted small">Аудиопоток YouTube недоступен — пробуем встроенный плеер.</p>}
             {fallbackId === currentTrack && <button className="button tiny" onClick={() => { if (typeof ytPlayer.current?.playVideo === 'function') ytPlayer.current.playVideo(); }}>Запустить YouTube</button>}
             {audioError && <p className="notice" role="alert">{audioError}</p>}
@@ -1475,7 +1564,7 @@ export default function App() {
               if (currentItem) preparedAudio.current.delete(audioCacheKey(currentItem));
               setStreamAttempt((value) => value + 1);
             }}>Повторить загрузку аудио</button>}
-            {!audioUrl && !audioError && fallbackId !== currentTrack && <p className="muted small">Получаем аудиопоток…</p>}
+            {!audioUrl && !audioError && !isSpotify && fallbackId !== currentTrack && <p className="muted small">Получаем аудиопоток…</p>}
           </> : null}</div>
         </section>}
         <section className="card cardpad"><div className="sectionhead"><div><span className="eyebrow">ОБЩИЙ РИТМ</span><h3>Очередь треков</h3></div><span className="pill">{queueItems.length} треков</span></div>
@@ -1547,7 +1636,7 @@ export default function App() {
               onClick={() => { setMusicProvider(provider); setMusicSearch(''); setMusicUrl(''); setMusicError(''); }}>{MUSIC_LABELS[provider]}</button>)}</div>
           <div role="tabpanel" aria-label={MUSIC_LABELS[musicProvider]}>
             {musicProvider === 'soundcloud' && <p className="muted small">Импортируйте публичные лайки по ссылке на профиль — бесплатного аккаунта достаточно. Приватная библиотека доступна через вход, когда подключено приложение SoundCloud.</p>}
-            {musicProvider === 'spotify' && <p className="muted small">{musicCapability?.native_library ? 'Подключите аккаунт, чтобы загрузить любимые треки. Клиентский вход может требовать Spotify Premium. ' : 'Вставьте ссылку на публичный плейлист Spotify — вход и Premium для импорта не нужны. '}Для воспроизведения подбираем запись на YouTube; она может отличаться от оригинала.</p>}
+            {musicProvider === 'spotify' && <p className="muted small">{musicCapability?.native_library ? 'Подключите аккаунт, чтобы загрузить любимые треки. ' : 'Вставьте ссылку на публичный плейлист. '}По умолчанию добавляем оригинал Spotify: хост слушает его в родном плеере, где может потребоваться вход с Premium. Подбор через YouTube включается отдельно ниже.</p>}
             {musicProvider === 'vk' && <p className="muted small">Экспериментальное подключение своей музыки через публичный OAuth. После подтверждения VK проверим, разрешён ли доступ к аудиозаписям.</p>}
             {musicCapability?.device_login && musicCapability.native_library && <button className="button primary" disabled={musicBusy} onClick={() => void startMusicDevice()}>Подключить Spotify по коду →</button>}
             {musicCapability?.public_import && <form onSubmit={(event) => { event.preventDefault(); importMusic(); }} className="music-import">
@@ -1562,9 +1651,8 @@ export default function App() {
             {musicCapability?.oauth && <button className="button primary" disabled={musicBusy} onClick={() => void startMusicLogin()}>Подключить {MUSIC_LABELS[musicProvider]} ↗</button>}
             {musicCapability && !musicCapability.oauth && !musicCapability.public_import && <p className="muted small">{musicCapability.reason}</p>}
             {musicDeviceLogin && <div className="authbox" style={{ marginTop: 16 }}><span className="eyebrow">ПОДТВЕРДИТЕ ВХОД {MUSIC_LABELS[musicDeviceLogin.provider]}</span>
-              <p className="muted small">Откройте страницу Spotify, войдите в свой аккаунт и подтвердите код. Библиотека загрузится после проверки доступа.</p>
-              <div className="row" style={{ flexWrap: 'wrap' }}><code className="code mono">{musicDeviceLogin.user_code}</code>
-                <button className="button tiny" onClick={() => void copy(musicDeviceLogin.user_code, 'Код')}>Копировать код</button></div>
+              <p className="muted small">Откройте Spotify и подтвердите вход. Если страница попросит код, он указан ниже.</p>
+              <code className="code mono">{musicDeviceLogin.user_code}</code>
               <div className="row" style={{ flexWrap: 'wrap', marginTop: 14 }}><a className="button primary linklike" href={musicDeviceLogin.verification_url} target="_blank" rel="noopener noreferrer"
                 onClick={(event) => { if (telegramInitData && telegram?.openLink) { event.preventDefault(); telegram.openLink(musicDeviceLogin.verification_url); } }}>Открыть Spotify ↗</a>
                 <button className="button tiny" onClick={cancelMusicDevice}>Отменить</button></div>
@@ -1581,7 +1669,7 @@ export default function App() {
                 <button className="button primary" disabled={musicBusy || !vkToken.trim()}>Подключить и загрузить музыку</button>
               </form>
             </>}
-            {musicProvider === 'spotify' && <label className="music-consent"><input type="checkbox" checked={spotifyConsent} onChange={(event) => setSpotifyConsent(event.target.checked)} />Разрешаю подбирать и воспроизводить записи через YouTube</label>}
+            {musicProvider === 'spotify' && <label className="music-consent"><input type="checkbox" checked={spotifyConsent} onChange={(event) => setSpotifyConsent(event.target.checked)} />Добавлять через YouTube вместо Spotify — разрешаю подбор другой записи</label>}
             {musicBusy && <p className="muted small" role="status">{musicDeviceLogin ? 'Ждём подтверждения Spotify…' : 'Загружаем музыку…'}</p>}
             {musicError && <p className="notice" role="alert">{musicError}</p>}
             {musicCooldown > 0 && <p className="muted small" role="status">Повторный запрос станет доступен через {musicCooldown >= 3600 ? `${Math.ceil(musicCooldown / 3600)} ч` : musicCooldown >= 60 ? `${Math.ceil(musicCooldown / 60)} мин` : `${musicCooldown} с`}. Повторный вход не ускоряет ожидание.{musicProvider === 'spotify' && ' Публичный плейлист можно импортировать отдельно выше.'}</p>}
@@ -1597,7 +1685,7 @@ export default function App() {
               <ul className="likes">{filteredMusic.map((track, index) => <li key={`${track.id}:${index}`}><div className="trackmeta"><strong>{track.title}</strong><small>{track.artist || MUSIC_LABELS[musicProvider]}</small>
                 {track.canonical_url && <a className="music-source" href={track.canonical_url} target="_blank" rel="noopener noreferrer">{MUSIC_LABELS[musicProvider]} ↗</a>}
                 {!track.playable && <small>{track.reason || 'Полный трек недоступен'}</small>}</div>
-                <button className="button tiny" disabled={status !== 'connected' || musicBusy || !track.playable || musicProvider === 'spotify' && !spotifyConsent} onClick={() => enqueueMusic(track)}>+ В очередь</button></li>)}</ul>
+                <button className="button tiny" disabled={status !== 'connected' || musicBusy || !track.playable} onClick={() => enqueueMusic(track)}>+ В очередь</button></li>)}</ul>
               {filteredMusic.length === 0 && <p className="muted small">Треки не найдены.</p>}
               {musicLibrary.has_more && <button className="button tiny" disabled={musicBusy} onClick={moreMusic}>Показать ещё</button>}
             </>}

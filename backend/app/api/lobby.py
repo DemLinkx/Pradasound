@@ -186,6 +186,7 @@ class QueueItem:
     access_revision: int = 0
     provider_session: str | None = None
     canonical_url: str | None = None
+    duration_ms: int = 0
 
 
 @dataclass
@@ -277,6 +278,7 @@ class ConnectionManager:
                 "queue_items": [
                     {"id": item.id, "track_id": item.track_id, "owner_id": item.owner_id,
                      "access_revision": item.access_revision,
+                     **({"duration_ms": item.duration_ms} if item.duration_ms else {}),
                      **({"canonical_url": item.canonical_url} if item.canonical_url else {})}
                     for item in lobby.queue_items
                 ],
@@ -425,7 +427,8 @@ async def lobby_ws(ws: WebSocket, lobby_id: str) -> None:
             if message.get("action") == "add_track":
                 track_id = message.get("track_id")
                 if not isinstance(track_id, str) or not re.fullmatch(
-                    r"(?:yandex_[0-9]{1,20}|sc_[0-9]{1,20}|vk_-?[0-9]{1,20}_[0-9]{1,20}|[A-Za-z0-9_-]{11})", track_id
+                    r"(?:yandex_[0-9]{1,20}|sc_[0-9]{1,20}|spotify_[A-Za-z0-9]{22}|"
+                    r"vk_-?[0-9]{1,20}_[0-9]{1,20}|[A-Za-z0-9_-]{11})", track_id
                 ):
                     await manager.send(ws, {"type": "error", "error": "invalid_track_id"})
                     continue
@@ -444,7 +447,8 @@ async def lobby_ws(ws: WebSocket, lobby_id: str) -> None:
                 provider_handle = None
                 provider_title = None
                 canonical_url = None
-                if track_id.startswith(("sc_", "vk_")):
+                duration_ms = 0
+                if track_id.startswith(("sc_", "vk_", "spotify_")):
                     from app.providers.music import validate_track
 
                     provider_handle = message.get("provider_session")
@@ -453,17 +457,22 @@ async def lobby_ws(ws: WebSocket, lobby_id: str) -> None:
                     ):
                         await manager.send(ws, {"type": "error", "error": "Подключите музыкальный сервис заново"})
                         continue
-                    provider = "soundcloud" if track_id.startswith("sc_") else "vk"
+                    provider = ("spotify" if track_id.startswith("spotify_") else
+                                "soundcloud" if track_id.startswith("sc_") else "vk")
+                    provider_id = track_id[8:] if provider == "spotify" else track_id[3:]
                     try:
-                        metadata = validate_track(provider, provider_handle, track_id[3:])
+                        metadata = validate_track(provider, provider_handle, provider_id)
                     except HTTPException as exc:
                         await manager.send(ws, {"type": "error", "error": str(exc.detail)})
                         continue
                     provider_title = f"{metadata['title']} — {metadata['artist']}"[:200]
                     canonical_url = str(metadata["canonical_url"])
+                    value = metadata.get("duration_ms")
+                    if provider == "spotify" and type(value) is int and 0 < value < 86400000:
+                        duration_ms = value
                 lobby.queue_items.append(QueueItem(uuid4().hex, track_id, owner_id, yandex_handle,
                                                    provider_session=provider_handle,
-                                                   canonical_url=canonical_url))
+                                                   canonical_url=canonical_url, duration_ms=duration_ms))
                 lobby.queue_revision += 1
                 title = provider_title or message.get("title")
                 if (

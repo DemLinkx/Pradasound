@@ -13,6 +13,7 @@ function sourceFunction(name) {
 }
 const parse = sourceFunction('yandexPage');
 const vkToken = sourceFunction('vkAccessToken');
+const spotifyPlayback = sourceFunction('spotifyPlayback');
 
 test('one unusual or malformed entry does not reject all liked tracks', () => {
   const page = parse({ tracks: [
@@ -53,4 +54,24 @@ test('VK final OAuth URL sends only its token, not the whole URL', () => {
   assert.throws(() => vkToken(`https://evil.example/blank.html#access_token=${token}`));
   assert.throws(() => vkToken(`https://evil.example@oauth.vk.com/blank.html#access_token=${token}`));
   assert.throws(() => vkToken('https://oauth.vk.com/blank.html#error=access_denied'));
+});
+
+test('Spotify preview is never treated as a finished full song', () => {
+  const result = spotifyPlayback({ duration: 30000, position: 30000, isPaused: true },
+    { duration: 30000, position: 29000, started: true }, 176000);
+  assert.equal(result.preview, true);
+  assert.equal(result.ended, false);
+});
+
+test('Spotify pauses and buffering do not advance the shared queue', () => {
+  const previous = { duration: 176000, position: 60000, started: true };
+  assert.equal(spotifyPlayback({ duration: 176000, position: 60000, isPaused: true }, previous).ended, false);
+  assert.equal(spotifyPlayback({ duration: 176000, position: 176000, isPaused: true, isBuffering: true }, previous).ended, false);
+});
+
+test('Spotify completion handles an end position and a reset to zero', () => {
+  const previous = { duration: 176000, position: 175500, started: true };
+  assert.equal(spotifyPlayback({ duration: 176000, position: 176000, isPaused: true }, previous, 176000).ended, true);
+  assert.equal(spotifyPlayback({ duration: 176000, position: 0, isPaused: true }, previous, 176000).ended, true);
+  assert.equal(spotifyPlayback({ duration: 176000, position: 0, isPaused: true }, { ...previous, started: false }).ended, false);
 });

@@ -117,3 +117,61 @@ def test_session_reconnect_updates_only_owners_tracks():
                 assert first not in str(state) and second not in str(state)
     for handle in (first, second):
         music.SESSIONS.pop(handle, None)
+
+
+def test_spotify_original_keeps_metadata_and_owner_without_exposing_credentials():
+    LOBBIES.clear()
+    identifier = "a" * 22
+    handle = music._store("spotify", "private-access-token")
+    music.SESSIONS[handle].imported[identifier] = {
+        "id": identifier,
+        "title": "Original",
+        "artist": "Artist",
+        "playable": True,
+        "canonical_url": f"https://open.spotify.com/track/{identifier}",
+        "duration_ms": 176000,
+    }
+    with TestClient(app) as client:
+        room = client.post("/api/lobby/create").json()
+        path = f"/api/lobby/{room['lobby_id']}/ws"
+        with client.websocket_connect(path) as host:
+            host.send_json({"host_token": room["host_token"]})
+            host.receive_json()
+            host.receive_json()
+            with client.websocket_connect(path) as guest:
+                guest.send_json({"member_token": "b" * 64})
+                owner = guest.receive_json()["owner_id"]
+                guest.receive_json()
+                host.receive_json()
+                guest.send_json(
+                    {
+                        "action": "add_track",
+                        "track_id": "spotify_" + identifier,
+                        "provider_session": handle,
+                        "title": "Wrong title",
+                    }
+                )
+                state = guest.receive_json()
+                assert host.receive_json() == state
+                item = state["queue_items"][0]
+                assert item["owner_id"] == owner and item["duration_ms"] == 176000
+                assert item["canonical_url"].endswith(identifier)
+                assert state["track_titles"]["spotify_" + identifier] == "Original — Artist"
+                assert handle not in str(state) and "private-access-token" not in str(state)
+                guest.send_json(
+                    {
+                        "action": "add_track",
+                        "track_id": "spotify_" + "b" * 22,
+                        "provider_session": handle,
+                    }
+                )
+                assert guest.receive_json()["type"] == "error"
+                host.send_json(
+                    {"action": "skip_track", "expected_revision": state["playback_revision"]}
+                )
+                assert (
+                    host.receive_json()["tracks_queue"]
+                    == guest.receive_json()["tracks_queue"]
+                    == []
+                )
+    music.SESSIONS.pop(handle, None)
