@@ -73,5 +73,6 @@ test('Spotify completion handles an end position and a reset to zero', () => {
   const previous = { duration: 176000, position: 175500, started: true };
   assert.equal(spotifyPlayback({ duration: 176000, position: 176000, isPaused: true }, previous, 176000).ended, true);
   assert.equal(spotifyPlayback({ duration: 176000, position: 0, isPaused: true }, previous, 176000).ended, true);
+  assert.equal(spotifyPlayback({ duration: 0, position: 0, isPaused: true }, previous, 176000).ended, true);
   assert.equal(spotifyPlayback({ duration: 176000, position: 0, isPaused: true }, { ...previous, started: false }).ended, false);
 });

@@ -115,7 +115,7 @@ function spotifyEmbedApi(): Promise<SpotifyEmbedApi> {
   }).catch((error) => { spotifyApiPromise = null; throw error; });
 }
 function spotifyPlayback(data: SpotifyUpdate, previous: SpotifyProgress, expectedDuration = 0) {
-  const duration = Number.isFinite(data.duration) ? Math.max(0, data.duration!) : previous.duration;
+  const duration = Number.isFinite(data.duration) && data.duration! > 0 ? data.duration! : previous.duration;
   const position = Number.isFinite(data.position) ? Math.max(0, data.position!) : previous.position;
   const playing = data.isPaused === false && data.isBuffering !== true;
   const preview = data.isPreview === true || expectedDuration > 45000 && duration > 0 && duration <= 31000 && expectedDuration > duration + 10000;
