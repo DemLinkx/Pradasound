@@ -335,7 +335,7 @@ def test_vk_login_route_is_not_shadowed(client):
 
 @pytest.mark.parametrize("token_input", [
     "x" * 30,
-    "token=" + "x" * 30,
+    "token= " + "x" * 30,
     "access_token=" + "x" * 30,
     "https://oauth.vk.com/blank.html#access_token=" + "x" * 30 + "&expires_in=0",
     "https://oauth.vk.ru/blank.html?access_token=" + "x" * 30,

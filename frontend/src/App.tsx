@@ -70,7 +70,7 @@ function vkAccessToken(input: string) {
   if (params) {
     const values = [...params.getAll('access_token'), ...params.getAll('token')];
     if (values.length !== 1) throw new Error('Нужна ссылка с одним access_token или сам токен VK.');
-    token = values[0];
+    token = values[0].trim();
   }
   if (!/^[A-Za-z0-9._-]{20,2048}$/.test(token)) throw new Error('Не удалось прочитать токен VK. Вставьте полный итоговый адрес, access_token=… или сам токен.');
   return token;

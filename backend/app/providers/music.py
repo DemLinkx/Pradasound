@@ -194,7 +194,7 @@ def _vk_access_token(value: str) -> str:
         values = params.get("access_token", []) + params.get("token", [])
         if len(values) != 1:
             raise HTTPException(400, "Нужна ссылка с одним access_token или сам токен VK")
-        token = values[0]
+        token = values[0].strip()
     if not re.fullmatch(r"[A-Za-z0-9._-]{20,2048}", token):
         raise HTTPException(400, "Не удалось прочитать токен VK: вставьте ссылку или сам токен")
     return token
