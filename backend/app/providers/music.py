@@ -1494,8 +1494,10 @@ async def public_import(provider: str, body: PublicBody, request: Request) -> di
     if provider != "soundcloud":
         raise HTTPException(501, "Публичный импорт этого сервиса пока не подтверждён")
     parsed = urlparse(body.url)
-    if not re.fullmatch(r"/[A-Za-z0-9_-]+/likes/?", parsed.path) or parsed.query:
-        raise HTTPException(400, "Нужна ссылка на публичные лайки SoundCloud")
+    match = re.fullmatch(r"/([A-Za-z0-9_-]+)(?:/likes)?/?", parsed.path)
+    if not match:
+        raise HTTPException(400, "Нужна ссылка на профиль или публичные лайки SoundCloud")
+    public_url = f"https://soundcloud.com/{match.group(1)}/likes"
     try:
         offset = int(body.cursor or "0")
     except ValueError:
@@ -1505,9 +1507,9 @@ async def public_import(provider: str, body: PublicBody, request: Request) -> di
     session = _session(body.session, "soundcloud") if body.session else None
     if session is not None and session.access_token:
         raise HTTPException(400, "Используйте отдельный публичный импорт")
-    if session is not None and session.public_url != body.url:
+    if session is not None and session.public_url != public_url:
         raise HTTPException(400, "Публичная ссылка не соответствует подключению")
-    info = await _extract_async(body.url, flat=True, offset=offset)
+    info = await _extract_async(public_url, flat=True, offset=offset)
     raw_entries = info.get("entries") or []
     if not isinstance(raw_entries, list):
         raise HTTPException(502, "Некорректный ответ SoundCloud")
@@ -1516,7 +1518,7 @@ async def public_import(provider: str, body: PublicBody, request: Request) -> di
         session = SESSIONS[handle]
     else:
         handle = body.session
-    session.public_url = body.url
+    session.public_url = public_url
     imported = []
     for raw in raw_entries[:PAGE_SIZE]:
         if not isinstance(raw, dict):

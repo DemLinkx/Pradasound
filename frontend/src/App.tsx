@@ -2,6 +2,9 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, FormEvent } from 'react';
 import type Hls from 'hls.js';
 import brandLogo from './assets/prada-sound-logo.png';
+import party1 from './assets/party-1.jpg';
+import party2 from './assets/party-2.jpg';
+import party3 from './assets/party-3.jpg';
 
 type Session = { lobby_id: string; role: 'Main' | 'Member'; host_token?: string };
 type YandexTrack = { id: string; title: string; artist: string; playable: boolean; reason: string };
@@ -287,12 +290,14 @@ const STYLES = `
   .app{background:#191a1c;min-height:100dvh}
   .app:before,.app:after{display:none}
   .backdrop{position:fixed;inset:0;z-index:0;pointer-events:none;overflow:hidden;isolation:isolate;background:#191a1c}
-  .backdrop:before{content:"";position:absolute;inset:0;background:radial-gradient(ellipse at 80% 8%,#38291f55,transparent 55%),radial-gradient(ellipse at 10% 85%,#1f2a3155,transparent 55%)}
-  .backdrop:after{content:"";position:absolute;inset:-30px;opacity:.85;mix-blend-mode:multiply;background-size:234px 234px;background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3CfeComponentTransfer%3E%3CfeFuncR type='linear' slope='2.2' intercept='-.6'/%3E%3CfeFuncG type='linear' slope='2.2' intercept='-.6'/%3E%3CfeFuncB type='linear' slope='2.2' intercept='-.6'/%3E%3C/feComponentTransfer%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");animation:filmGrain .35s steps(1,end) infinite;will-change:transform}
+  .backdrop-art{position:absolute;inset:-5%;background:var(--party-image) center/cover no-repeat;filter:blur(4px) brightness(.8);transform:scale(1.04);animation:backgroundDrift 36s ease-in-out infinite alternate;will-change:transform}
+  .backdrop:before{content:"";position:absolute;inset:0;z-index:1;background:linear-gradient(115deg,#080b1290,#08090f99),radial-gradient(ellipse at center,transparent 15%,#06080d88 100%)}
+  @keyframes backgroundDrift{from{transform:scale(1.04) translate3d(-.5%,0,0)}to{transform:scale(1.1) translate3d(.5%,-.5%,0)}}
+  .backdrop:after{content:"";position:absolute;z-index:2;inset:-30px;opacity:.27;mix-blend-mode:multiply;background-size:234px 234px;background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3CfeComponentTransfer%3E%3CfeFuncR type='linear' slope='2.2' intercept='-.6'/%3E%3CfeFuncG type='linear' slope='2.2' intercept='-.6'/%3E%3CfeFuncB type='linear' slope='2.2' intercept='-.6'/%3E%3C/feComponentTransfer%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");animation:filmGrain .35s steps(1,end) infinite;will-change:transform}
   @keyframes filmGrain{0%{transform:translate(0,0)}10%{transform:translate(-13px,9px)}20%{transform:translate(8px,-16px)}30%{transform:translate(-18px,-8px)}40%{transform:translate(15px,12px)}50%{transform:translate(-7px,-19px)}60%{transform:translate(19px,-5px)}70%{transform:translate(-16px,17px)}80%{transform:translate(6px,-11px)}90%{transform:translate(13px,19px)}}
   .shell{position:relative;z-index:1;width:min(1440px,calc(100% - 64px));padding-top:22px}.topbar{margin-bottom:24px}
   .landing{min-height:0;padding-top:clamp(24px,4vh,48px)}
-  .landing-copy{animation:headlineEnter .65s ease-out both}.headline-word{display:inline-block;transition:transform .3s ease,color .3s ease}.headline-word+.headline-word{margin-left:.08em}.headline-word:hover,.headline-word:active{transform:translateY(-5px);color:#fff}.headline-accent .headline-word:hover,.headline-accent .headline-word:active{color:#ffca98}.headline-accent{display:inline-block;animation:accentPulse 7s ease-in-out infinite}
+  .landing-copy{text-shadow:0 2px 20px #000c;animation:headlineEnter .65s ease-out both}.headline-word{display:inline-block;transition:transform .3s ease,color .3s ease}.headline-word+.headline-word{margin-left:.08em}.headline-word:hover,.headline-word:active{transform:translateY(-5px);color:#fff}.headline-accent .headline-word:hover,.headline-accent .headline-word:active{color:#ffca98}.headline-accent{display:inline-block;animation:accentPulse 7s ease-in-out infinite}
   @keyframes headlineEnter{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}@keyframes accentPulse{0%,100%{color:#f9a15b}50%{color:#ffc18a}}
   .copy-toast{position:fixed;z-index:10;top:max(18px,env(safe-area-inset-top));right:24px;max-width:min(380px,calc(100vw - 32px));margin:0;padding:12px 18px;border:1px solid #db996977;border-radius:14px;background:#24201ff2;color:#ffd0ac;box-shadow:0 12px 35px #0008;pointer-events:none;animation:toastFade 3.6s ease both}
   @keyframes toastFade{0%{opacity:0;transform:translateY(-8px)}8%,84%{opacity:1;transform:translateY(0)}100%{opacity:0;transform:translateY(-8px)}}
@@ -324,17 +329,18 @@ const STYLES = `
   .share-card{padding:22px 24px}.share-card .sectionhead{margin-bottom:10px}.share-card .share{display:grid;grid-template-columns:minmax(0,1fr) 108px;gap:14px}.share-card .sharetext{min-width:0}.share-card .sharetext p{margin:4px 0 10px}.share-card .sharelink{font-size:12px;padding:10px}.share-card .roomid{margin:10px 0 0}.share-card .qr{width:108px;height:108px}
   .yandex-card{scroll-margin-top:24px}.likes{max-height:min(48vh,520px);overscroll-behavior:contain}.likes li{padding:10px 12px}.likes li:hover,.queue li:hover{border-color:#d39a6b4b}
   .sidecol.music-ready .yandex-card{order:-1}
-  .music-tabs{display:flex;gap:8px;flex-wrap:wrap;margin:18px 0}.music-tabs .button{flex:1;white-space:nowrap}.music-import .button{width:100%}.music-consent{display:flex;gap:10px;align-items:flex-start;font-size:13px;line-height:1.5;color:#e4e4e4;margin:18px 0}.music-consent input{width:17px;min-width:17px;margin-top:2px;accent-color:#f58b3b}.music-source{display:inline-block;font-size:11px;color:#efac74;margin-top:6px}
+  .music-tabs{display:flex;gap:8px;flex-wrap:wrap;margin:18px 0}.music-tabs .button{flex:1;white-space:nowrap}.music-import{display:grid;gap:14px}.music-import .button{width:100%}.music-consent{display:flex;gap:10px;align-items:flex-start;font-size:13px;line-height:1.5;color:#e4e4e4;margin:18px 0}.music-consent input{width:17px;min-width:17px;margin-top:2px;accent-color:#f58b3b}.music-source{display:inline-block;font-size:11px;color:#efac74;margin-top:6px}
   .authbox{border-color:#ad744c77;background:linear-gradient(120deg,#9d633326,#ffffff05)}.code{border-color:#b6805970}
   .queue li.current{background:#c786581c;border-color:#bd825562}.queue .current .index{color:#e0a573}
   @media(max-width:1000px){.dashboard{grid-template-columns:minmax(0,1fr) minmax(300px,.8fr)}.deck-stage{grid-template-columns:minmax(0,1fr) 210px}.miniPlayer{min-height:205px}}
   @media(max-width:850px){.dashboard{grid-template-columns:1fr}.shell{width:min(100% - 32px,680px)}.deck-stage{grid-template-columns:minmax(0,1fr) minmax(170px,36%)}.sidecol.music-ready .yandex-card{order:0}}
   @media(max-width:550px){.shell{width:min(100% - 24px,680px);padding-top:16px}.topbar{margin-bottom:18px}.landing{padding-top:12px}.copy-toast{right:16px}.deck{padding:20px}.deck-stage{grid-template-columns:1fr;min-height:0;gap:16px;padding-bottom:20px}.deck-stage-copy{min-height:145px}.deck-stage-copy h2{font-size:clamp(27px,8vw,38px)}.miniPlayer{min-height:0;aspect-ratio:16/9}.share-card{padding:20px}.share-card .share{grid-template-columns:minmax(0,1fr) 96px}.share-card .qr{width:96px;height:96px}.likes{max-height:400px}.brand{font-size:20px}}
   @media(max-width:550px){.brandmark{width:44px;height:44px}.topbar>.pill{display:none}}
-  @media(prefers-reduced-motion:reduce){.backdrop:after,.bars i,.spectrum i,.landing-copy,.headline-accent,.copy-toast{animation:none}.button,.headline-word{transition:none}.headline-word:hover,.headline-word:active{transform:none}}
+  @media(prefers-reduced-motion:reduce){.backdrop-art,.backdrop:after,.bars i,.spectrum i,.landing-copy,.headline-accent,.copy-toast{animation:none}.button,.headline-word{transition:none}.headline-word:hover,.headline-word:active{transform:none}}
 `;
 
 export default function App() {
+  const [partyImage] = useState(() => [party1, party2, party3][Math.floor(Math.random() * 3)]);
   const [session, setSession] = useState<Session | null>(() => {
     const params = new URLSearchParams(location.search);
     const start = params.get('tgWebAppStartParam') || '';
@@ -1608,7 +1614,7 @@ export default function App() {
   const musicCapability = musicCapabilities[musicProvider];
   const musicCooldown = Math.max(0, Math.ceil(((musicRetryUntil[musicProvider] || 0) - musicClock) / 1000));
   const filteredMusic = (musicLibrary?.tracks || []).filter((track) => `${track.title} ${track.artist}`.toLocaleLowerCase('ru').includes(musicSearch.trim().toLocaleLowerCase('ru')));
-  return <main className={`app ${telegramInitData ? 'telegram-app' : ''}`}><style>{STYLES}</style><div className="backdrop" aria-hidden="true" /><div className="shell">
+  return <main className={`app ${telegramInitData ? 'telegram-app' : ''}`}><style>{STYLES}</style><div className="backdrop" aria-hidden="true"><div className="backdrop-art" style={{ '--party-image': `url("${partyImage}")` } as CSSProperties} /></div><div className="shell">
     <header className="topbar"><div className="brand"><span className="brandmark"><img src={brandLogo} width="54" height="54" alt="" /></span> PRADA SOUND</div>
       {me ? <span className="profile-chip"><Avatar profile={me} size={32} /><span>{profileLabel(me)}</span></span> :
         <span className="pill"><span className="dot" /> PRIVATE MUSIC ROOM</span>}</header>
@@ -1827,21 +1833,21 @@ export default function App() {
             {musicProvider === 'soundcloud' && <p className="muted small">Импортируйте публичные лайки по ссылке на профиль — бесплатного аккаунта достаточно. Приватная библиотека доступна через вход, когда подключено приложение SoundCloud.</p>}
             {musicProvider === 'spotify' && <p className="muted small">{musicCapability?.native_library ? 'Подключите аккаунт, чтобы загрузить любимые треки. ' : 'Вставьте ссылку на публичный плейлист. '}По умолчанию добавляем оригинал Spotify: хост слушает его в родном плеере, где может потребоваться вход с Premium. Подбор через YouTube включается отдельно ниже.</p>}
             {musicProvider === 'vk' && <p className="muted small">Экспериментальное подключение своей музыки через публичный OAuth. После подтверждения VK проверим, разрешён ли доступ к аудиозаписям.</p>}
-            {musicCapability?.device_login && musicCapability.native_library && <button className="button primary" disabled={musicBusy} onClick={() => void startMusicDevice()}>Подключить Spotify по коду →</button>}
+            {musicCapability?.device_login && musicCapability.native_library && <button className="button primary" disabled={musicBusy} onClick={() => void startMusicDevice()}>Подключить Spotify →</button>}
             {musicCapability?.public_import && <form onSubmit={(event) => { event.preventDefault(); importMusic(); }} className="music-import">
-              <label className="field">{musicProvider === 'soundcloud' ? 'Ссылка на публичные лайки' : 'Ссылка на публичный плейлист'}
-                <input type="url" required value={musicUrl} onChange={(event) => setMusicUrl(event.target.value)} placeholder={musicProvider === 'soundcloud' ? 'https://soundcloud.com/ваш-профиль/likes' : 'https://open.spotify.com/playlist/…'} aria-label={`Ссылка для импорта ${MUSIC_LABELS[musicProvider]}`} />
+              <label className="field">{musicProvider === 'soundcloud' ? 'Ссылка на профиль или публичные лайки' : 'Ссылка на публичный плейлист'}
+                <input type="url" required value={musicUrl} onChange={(event) => setMusicUrl(event.target.value)} placeholder={musicProvider === 'soundcloud' ? 'https://soundcloud.com/ваш-профиль' : 'https://open.spotify.com/playlist/…'} aria-label={`Ссылка для импорта ${MUSIC_LABELS[musicProvider]}`} />
               </label><button className="button primary" disabled={musicBusy || !musicUrl.trim()}>{musicProvider === 'spotify' ? 'Загрузить плейлист' : 'Загрузить треки'}</button>
             </form>}
             {musicCapability?.device_login && !musicCapability.native_library && <details style={{ marginTop: 16 }}><summary>Личные лайки: экспериментальный вход</summary>
               <p className="muted small">Spotify может подтвердить вход, но отклонить доступ к библиотеке приложения. Подписка и повторный вход не снимают это ограничение. В этом случае используйте публичный плейлист выше.</p>
-              <button className="button tiny" disabled={musicBusy || musicCooldown > 0} onClick={() => void startMusicDevice()}>Подключить {MUSIC_LABELS[musicProvider]} по коду →</button>
+              <button className="button tiny" disabled={musicBusy || musicCooldown > 0} onClick={() => void startMusicDevice()}>Подключить {MUSIC_LABELS[musicProvider]} →</button>
             </details>}
             {musicCapability?.oauth && <button className="button primary" disabled={musicBusy} onClick={() => void startMusicLogin()}>Подключить {MUSIC_LABELS[musicProvider]} ↗</button>}
             {musicCapability && !musicCapability.oauth && !musicCapability.public_import && <p className="muted small">{musicCapability.reason}</p>}
             {musicDeviceLogin && <div className="authbox" style={{ marginTop: 16 }}><span className="eyebrow">ПОДТВЕРДИТЕ ВХОД {MUSIC_LABELS[musicDeviceLogin.provider]}</span>
-              <p className="muted small">Откройте Spotify и подтвердите вход. Если страница попросит код, он указан ниже.</p>
-              <code className="code mono">{musicDeviceLogin.user_code}</code>
+              <p className="muted small">Откройте Spotify и подтвердите вход.</p>
+              {!Array.from(new URL(musicDeviceLogin.verification_url).searchParams.values()).some((value) => value.replace(/[- ]/g, '').toUpperCase() === musicDeviceLogin.user_code.replace(/[- ]/g, '').toUpperCase()) && <><p className="muted small">Если Spotify запросит код, введите:</p><code className="code mono">{musicDeviceLogin.user_code}</code></>}
               <div className="row" style={{ flexWrap: 'wrap', marginTop: 14 }}><a className="button primary linklike" href={musicDeviceLogin.verification_url} target="_blank" rel="noopener noreferrer"
                 onClick={(event) => { if (telegramInitData && telegram?.openLink) { event.preventDefault(); telegram.openLink(musicDeviceLogin.verification_url); } }}>Открыть Spotify ↗</a>
                 <button className="button tiny" onClick={cancelMusicDevice}>Отменить</button></div>

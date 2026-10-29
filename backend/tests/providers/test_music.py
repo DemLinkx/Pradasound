@@ -1261,3 +1261,36 @@ def test_vk_compatible_version_is_used_for_login_pages_and_playback(client, monk
     stream = client.get("/api/music/queue/room/item/stream")
     assert stream.status_code == 200
     assert len(seen) == 3
+
+
+@pytest.mark.parametrize("url", [
+    "https://soundcloud.com/clalberg",
+    "https://soundcloud.com/clalberg/",
+    "https://soundcloud.com/clalberg/likes",
+    "https://m.soundcloud.com/clalberg?utm_source=share",
+    "https://www.soundcloud.com/clalberg/likes/?si=test",
+])
+def test_soundcloud_profile_links_resolve_to_likes_for_all_pages(client, monkeypatch, url):
+    calls = []
+
+    async def extract(target, *, flat=False, offset=0):
+        calls.append((target, offset))
+        return {"entries": []}
+
+    monkeypatch.setattr(music, "_extract_async", extract)
+    response = client.post("/api/music/soundcloud/public", json={"url": url})
+    assert response.status_code == 200
+    handle = response.json()["session"]
+    assert client.get("/api/music/soundcloud/tracks?cursor=50", headers={
+        "X-Music-Session": handle}).status_code == 200
+    assert calls == [("https://soundcloud.com/clalberg/likes", 0),
+                     ("https://soundcloud.com/clalberg/likes", 50)]
+
+
+@pytest.mark.parametrize("url", [
+    "https://evil.example/clalberg", "http://soundcloud.com/clalberg",
+    "https://soundcloud.com/clalberg/a-track", "https://soundcloud.com/",
+])
+def test_soundcloud_profile_import_rejects_other_hosts_and_paths(client, monkeypatch, url):
+    monkeypatch.setattr(music, "_extract_async", lambda *a, **kw: pytest.fail("unexpected fetch"))
+    assert client.post("/api/music/soundcloud/public", json={"url": url}).status_code == 400
