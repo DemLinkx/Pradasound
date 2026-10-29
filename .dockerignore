@@ -3,6 +3,8 @@
 !backend/Dockerfile
 !backend/pyproject.toml
 !backend/uv.lock
+!backend/spotify-native/
+!backend/spotify-native/**
 !backend/app/
 !backend/app/**
 !frontend/

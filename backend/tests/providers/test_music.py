@@ -16,6 +16,7 @@ from app.providers import music
 
 @pytest.fixture(autouse=True)
 def clear_state(monkeypatch):
+    monkeypatch.delenv("SPOTIFY_NATIVE_HELPER", raising=False)
     monkeypatch.setattr(music.settings, "cors_origins", ["http://localhost:5173"])
     music.PENDING.clear()
     music.PENDING_DEVICES.clear()
@@ -29,6 +30,99 @@ def clear_state(monkeypatch):
     music.SESSIONS.clear()
     music.TICKETS.clear()
     music.ROUTE_FAILURES.clear()
+
+
+def test_native_spotify_library_pages_without_web_api(client, monkeypatch):
+    monkeypatch.setenv("SPOTIFY_NATIVE_HELPER", "/reader")
+    handle = music._store(
+        "spotify", "access-secret", client_id=music.SPOTIFY_DEVICE_ID, proxy="socks5://music:1081"
+    )
+    received = []
+
+    class Process:
+        returncode = 0
+
+        async def communicate(self, payload):
+            received.append(json.loads(payload))
+            return json.dumps(
+                {
+                    "tracks": [{"id": "a" * 22, "title": "Private song", "artist": "Singer"}],
+                    "cursor": "next-private-page" if len(received) == 1 else "",
+                }
+            ).encode(), None
+
+    async def spawn(*args, **kwargs):
+        assert args == ("/reader",)
+        assert kwargs["env"]["ALL_PROXY"] == "socks5://music:1081"
+        assert kwargs["env"]["HTTPS_PROXY"] == "socks5://music:1081"
+        return Process()
+
+    monkeypatch.setattr(music.asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setattr(
+        music, "_client", lambda *args: pytest.fail("Native import must not call Web API")
+    )
+    first = client.get("/api/music/spotify/tracks", headers={"X-Music-Session": handle})
+    assert first.status_code == 200
+    assert first.json()["authenticated"] is True
+    assert first.json()["tracks"][0]["title"] == "Private song"
+    assert first.json()["next_cursor"] == "50"
+    assert "access-secret" not in first.text and "next-private-page" not in first.text
+    second = client.get("/api/music/spotify/tracks?cursor=50", headers={"X-Music-Session": handle})
+    assert second.status_code == 200 and second.json()["has_more"] is False
+    assert received == [
+        {"token": "access-secret", "cursor": ""},
+        {"token": "access-secret", "cursor": "next-private-page"},
+    ]
+    assert (
+        client.get(
+            "/api/music/spotify/tracks?cursor=100", headers={"X-Music-Session": handle}
+        ).status_code
+        == 400
+    )
+
+
+def test_native_spotify_failure_is_not_an_empty_library(client, monkeypatch, caplog):
+    monkeypatch.setenv("SPOTIFY_NATIVE_HELPER", "/reader")
+    handle = music._store("spotify", "access-secret", client_id=music.SPOTIFY_DEVICE_ID)
+
+    class Process:
+        returncode = 0
+
+        async def communicate(self, payload):
+            return b'{"error":"collection","tracks":null,"cursor":""}', None
+
+    async def spawn(*args, **kwargs):
+        return Process()
+
+    monkeypatch.setattr(music.asyncio, "create_subprocess_exec", spawn)
+    response = client.get("/api/music/spotify/tracks", headers={"X-Music-Session": handle})
+    assert response.status_code == 502
+    assert "collection" in caplog.text and "access-secret" not in caplog.text
+
+
+def test_native_spotify_timeout_stops_reader(client, monkeypatch):
+    monkeypatch.setenv("SPOTIFY_NATIVE_HELPER", "/reader")
+    handle = music._store("spotify", "access-secret", client_id=music.SPOTIFY_DEVICE_ID)
+    stopped = []
+
+    class Process:
+        returncode = None
+
+        async def communicate(self, payload):
+            raise TimeoutError
+
+        def kill(self):
+            stopped.append(True)
+
+        async def wait(self):
+            self.returncode = -9
+
+    async def spawn(*args, **kwargs):
+        return Process()
+
+    monkeypatch.setattr(music.asyncio, "create_subprocess_exec", spawn)
+    response = client.get("/api/music/spotify/tracks", headers={"X-Music-Session": handle})
+    assert response.status_code == 502 and stopped == [True]
 
 
 @pytest.fixture

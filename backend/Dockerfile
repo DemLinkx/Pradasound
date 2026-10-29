@@ -1,4 +1,11 @@
 # syntax=docker/dockerfile:1
+FROM golang:1.25.5-bookworm AS spotify-reader
+WORKDIR /build
+COPY backend/spotify-native/go.mod backend/spotify-native/go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
+COPY backend/spotify-native/main.go ./
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /spotify-library .
+
 FROM python:3.12-slim-bookworm AS dependencies
 COPY --from=ghcr.io/astral-sh/uv:0.12.19 /uv /usr/local/bin/uv
 ENV UV_LINK_MODE=copy UV_COMPILE_BYTECODE=1 UV_PYTHON_DOWNLOADS=never
@@ -13,7 +20,9 @@ LABEL org.opencontainers.image.source=$SOURCE_URL \
       org.opencontainers.image.revision=$REVISION
 ENV PATH="/app/backend/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
-    DENO_DIR=/tmp/deno DENO_NO_UPDATE_CHECK=1
+    DENO_DIR=/tmp/deno DENO_NO_UPDATE_CHECK=1 \
+    SPOTIFY_NATIVE_HELPER=/usr/local/bin/prada-spotify-library
+COPY --from=spotify-reader /spotify-library /usr/local/bin/prada-spotify-library
 COPY --from=denoland/deno:bin-2.9.8 /deno /usr/local/bin/deno
 RUN groupadd --gid 10001 prada \
     && useradd --uid 10001 --gid prada --no-create-home --shell /usr/sbin/nologin prada

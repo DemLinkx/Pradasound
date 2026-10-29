@@ -9,6 +9,7 @@ import hmac
 import json
 import logging
 import math
+import os
 import re
 import secrets
 from collections.abc import AsyncIterator
@@ -107,6 +108,7 @@ class AudioTicket:
 
 TICKETS: dict[str, AudioTicket] = {}
 _extract_limit = asyncio.Semaphore(1)
+_spotify_native_limit = asyncio.Semaphore(1)
 
 
 class QuietMusicLog:
@@ -487,6 +489,130 @@ def _spotify_public_page(session: MusicSession, handle: str, cursor: str) -> dic
     }
 
 
+async def _spotify_native_page(session: MusicSession, handle: str, cursor: str) -> dict[str, Any]:
+    helper = os.environ.get("SPOTIFY_NATIVE_HELPER", "")
+    if not helper:
+        raise HTTPException(503, "Чтение библиотеки Spotify ещё не установлено на сервере")
+    try:
+        offset = int(cursor or "0")
+    except ValueError:
+        raise HTTPException(400, "Некорректная страница") from None
+    if offset < 0 or offset >= MAX_TRACKS or str(offset) != (cursor or "0"):
+        raise HTTPException(400, "Некорректная страница")
+    if cursor and cursor not in session.page_urls:
+        raise HTTPException(400, "Страница ещё не загружена")
+    await _refresh(session)
+    async with session.lock, _spotify_native_limit:
+        env = os.environ.copy()
+        # Proxy applies only to this short-lived reader, including its TCP session.
+        for name in (
+            "ALL_PROXY",
+            "HTTPS_PROXY",
+            "HTTP_PROXY",
+            "all_proxy",
+            "https_proxy",
+            "http_proxy",
+        ):
+            env.pop(name, None)
+        env.update(
+            ALL_PROXY=session.proxy or "",
+            HTTPS_PROXY=session.proxy or "",
+            NO_PROXY="",
+            GOMEMLIMIT="48MiB",
+        )
+        payload = json.dumps(
+            {"token": session.access_token, "cursor": session.page_urls.get(cursor, "")}
+        ).encode()
+        process = None
+        try:
+            process = await asyncio.create_subprocess_exec(
+                helper,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+                env=env,
+            )
+            stdout, _ = await asyncio.wait_for(process.communicate(payload), 45)
+            if process.returncode != 0 or len(stdout) > 2_000_000:
+                raise ValueError("reader")
+            body = json.loads(stdout)
+        except (OSError, TimeoutError, ValueError):
+            raise HTTPException(
+                502, "Клиентское подключение Spotify не ответило; попробуйте подключиться заново"
+            ) from None
+        finally:
+            if process is not None and process.returncode is None:
+                process.kill()
+                await process.wait()
+        if not isinstance(body, dict):
+            raise HTTPException(502, "Некорректный ответ клиентской библиотеки Spotify")
+        error = body.get("error")
+        if error:
+            stage = (
+                error
+                if error
+                in {"resolve", "session", "client_token", "login5", "collection", "metadata"}
+                else "reader"
+            )
+            logging.getLogger("uvicorn.error").warning("spotify_native_read_failed stage=%s", stage)
+            details = {
+                "resolve": "Не удалось связаться с клиентским сервисом Spotify",
+                "session": "Spotify не открыл клиентскую сессию; попробуйте новый вход с Premium",
+                "client_token": "Spotify не подтвердил клиент приложения",
+                "login5": "Spotify не подтвердил доступ клиентской сессии",
+                "collection": "Spotify не отдал список любимых треков",
+                "metadata": "Spotify не отдал названия и исполнителей любимых треков",
+            }
+            raise HTTPException(
+                502,
+                details.get(stage, "Не удалось прочитать библиотеку Spotify"),
+            )
+        raw_tracks = body.get("tracks")
+        next_token = body.get("cursor")
+        if (
+            not isinstance(raw_tracks, list)
+            or len(raw_tracks) > PAGE_SIZE
+            or not isinstance(next_token, str)
+            or len(next_token) > 8192
+        ):
+            raise HTTPException(502, "Некорректная страница библиотеки Spotify")
+        normalized = []
+        for raw in raw_tracks:
+            if not isinstance(raw, dict):
+                continue
+            identifier, title, artist = raw.get("id"), raw.get("title"), raw.get("artist")
+            if (
+                not isinstance(identifier, str)
+                or not re.fullmatch(r"[A-Za-z0-9]{22}", identifier)
+                or not isinstance(title, str)
+                or not title
+            ):
+                continue
+            item: dict[str, object] = {
+                "id": identifier,
+                "title": title[:200],
+                "artist": artist[:200] if isinstance(artist, str) else "",
+                "canonical_url": f"https://open.spotify.com/track/{identifier}",
+                "playable": True,
+                "reason": "Воспроизведение через найденное видео YouTube",
+            }
+            session.imported[identifier] = item
+            normalized.append(item)
+        if raw_tracks and not normalized:
+            raise HTTPException(502, "Spotify вернул некорректный список треков")
+        next_offset = offset + PAGE_SIZE
+        more = bool(next_token) and next_offset < MAX_TRACKS
+        if more:
+            session.page_urls[str(next_offset)] = next_token
+        return {
+            "session": handle,
+            "authenticated": True,
+            "tracks": normalized,
+            "next_cursor": str(next_offset) if more else None,
+            "has_more": more,
+        }
+
+
 async def _refresh(session: MusicSession) -> None:
     if session.provider == "vk" or session.expires > monotonic() + 60:
         return
@@ -739,6 +865,8 @@ async def providers() -> dict[str, Any]:
         result[provider] = {
             "oauth": enabled and provider != "vk",
             "device_login": device_enabled,
+            "native_library": provider == "spotify"
+            and bool(os.environ.get("SPOTIFY_NATIVE_HELPER")),
             "public_import": provider in {"spotify", "soundcloud"},
             "experimental_token": enabled and provider == "vk",
             "reason": reason,
@@ -791,7 +919,7 @@ async def start_device(provider: str, request: Request, response: Response) -> d
             client,
             "POST",
             "https://accounts.spotify.com/oauth2/device/authorize",
-            data={"client_id": client_id, "scope": "user-library-read"},
+            data={"client_id": client_id, "scope": "streaming user-library-read"},
         )
     device_code = body.get("device_code")
     user_code = body.get("user_code")
@@ -1122,6 +1250,8 @@ async def tracks(
     session = _session(x_music_session, provider)
     if provider == "spotify" and session.public_url:
         return _spotify_public_page(session, x_music_session, cursor)
+    if provider == "spotify" and session.client_id and os.environ.get("SPOTIFY_NATIVE_HELPER"):
+        return await _spotify_native_page(session, x_music_session, cursor)
     if provider == "soundcloud" and session.public_url:
         return await public_import(
             "soundcloud",

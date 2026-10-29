@@ -38,7 +38,7 @@ type QueueItem = { id: string; track_id: string; owner_id: string; access_revisi
 type MusicProvider = 'spotify' | 'soundcloud' | 'vk';
 type MusicTrack = { id: string; title: string; artist: string; canonical_url: string; playable: boolean; reason?: string };
 type MusicLibrary = { session: string; authenticated: boolean; tracks: MusicTrack[]; next_cursor: string | null; has_more: boolean; library_error?: string; library_error_status?: number; retry_after?: number; quota_reason?: string; import_notice?: string };
-type MusicCapability = { oauth: boolean; public_import: boolean; device_login?: boolean; experimental_token?: boolean; token_authorization_url?: string; token_application?: string; reason?: string };
+type MusicCapability = { oauth: boolean; public_import: boolean; device_login?: boolean; native_library?: boolean; experimental_token?: boolean; token_authorization_url?: string; token_application?: string; reason?: string };
 type MusicDeviceLogin = YandexLogin & { provider: MusicProvider };
 const MUSIC_LABELS: Record<MusicProvider, string> = { spotify: 'Spotify', soundcloud: 'SoundCloud', vk: 'VK Музыка' };
 const MUSIC_KEY = 'prada-sound-music';
@@ -1544,14 +1544,15 @@ export default function App() {
               onClick={() => { setMusicProvider(provider); setMusicSearch(''); setMusicUrl(''); setMusicError(''); }}>{MUSIC_LABELS[provider]}</button>)}</div>
           <div role="tabpanel" aria-label={MUSIC_LABELS[musicProvider]}>
             {musicProvider === 'soundcloud' && <p className="muted small">Импортируйте публичные лайки по ссылке на профиль — бесплатного аккаунта достаточно. Приватная библиотека доступна через вход, когда подключено приложение SoundCloud.</p>}
-            {musicProvider === 'spotify' && <p className="muted small">Вставьте ссылку на публичный плейлист Spotify — вход и Premium для импорта не нужны. Для воспроизведения подбираем запись на YouTube; она может отличаться от оригинала. Личные лайки можно собрать в публичный плейлист.</p>}
+            {musicProvider === 'spotify' && <p className="muted small">{musicCapability?.native_library ? 'Подключите аккаунт, чтобы загрузить любимые треки. Клиентский вход может требовать Spotify Premium. ' : 'Вставьте ссылку на публичный плейлист Spotify — вход и Premium для импорта не нужны. '}Для воспроизведения подбираем запись на YouTube; она может отличаться от оригинала.</p>}
             {musicProvider === 'vk' && <p className="muted small">Экспериментальное подключение своей музыки через публичный OAuth. После подтверждения VK проверим, разрешён ли доступ к аудиозаписям.</p>}
+            {musicCapability?.device_login && musicCapability.native_library && <button className="button primary" disabled={musicBusy} onClick={() => void startMusicDevice()}>Подключить Spotify по коду →</button>}
             {musicCapability?.public_import && <form onSubmit={(event) => { event.preventDefault(); importMusic(); }} className="music-import">
               <label className="field">{musicProvider === 'soundcloud' ? 'Ссылка на публичные лайки' : 'Ссылка на публичный плейлист'}
                 <input type="url" required value={musicUrl} onChange={(event) => setMusicUrl(event.target.value)} placeholder={musicProvider === 'soundcloud' ? 'https://soundcloud.com/ваш-профиль/likes' : 'https://open.spotify.com/playlist/…'} aria-label={`Ссылка для импорта ${MUSIC_LABELS[musicProvider]}`} />
               </label><button className="button primary" disabled={musicBusy || !musicUrl.trim()}>{musicProvider === 'spotify' ? 'Загрузить плейлист' : 'Загрузить треки'}</button>
             </form>}
-            {musicCapability?.device_login && <details style={{ marginTop: 16 }}><summary>Личные лайки: экспериментальный вход</summary>
+            {musicCapability?.device_login && !musicCapability.native_library && <details style={{ marginTop: 16 }}><summary>Личные лайки: экспериментальный вход</summary>
               <p className="muted small">Spotify может подтвердить вход, но отклонить доступ к библиотеке приложения. Подписка и повторный вход не снимают это ограничение. В этом случае используйте публичный плейлист выше.</p>
               <button className="button tiny" disabled={musicBusy || musicCooldown > 0} onClick={() => void startMusicDevice()}>Подключить {MUSIC_LABELS[musicProvider]} по коду →</button>
             </details>}
