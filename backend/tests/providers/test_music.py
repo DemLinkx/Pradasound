@@ -333,7 +333,14 @@ def test_vk_login_route_is_not_shadowed(client):
     assert response.status_code == 503
 
 
-def test_vk_public_authorization_url_and_direct_audio(client, monkeypatch):
+@pytest.mark.parametrize("token_input", [
+    "x" * 30,
+    "token=" + "x" * 30,
+    "access_token=" + "x" * 30,
+    "https://oauth.vk.com/blank.html#access_token=" + "x" * 30 + "&expires_in=0",
+    "https://oauth.vk.ru/blank.html?access_token=" + "x" * 30,
+])
+def test_vk_public_authorization_url_and_direct_audio(client, monkeypatch, token_input):
     monkeypatch.setattr(music.settings, "vk_audio_enabled", True)
     original_value = music._value
     monkeypatch.setattr(
@@ -350,7 +357,7 @@ def test_vk_public_authorization_url_and_direct_audio(client, monkeypatch):
     assert url.scheme == "https" and url.netloc == "oauth.vk.com"
     assert parse_qs(url.query) == {
         "client_id": ["2685278"],
-        "scope": ["8"],
+        "scope": ["audio,offline"],
         "redirect_uri": ["https://oauth.vk.com/blank.html"],
         "display": ["page"],
         "response_type": ["token"],
@@ -359,6 +366,7 @@ def test_vk_public_authorization_url_and_direct_audio(client, monkeypatch):
     calls = []
 
     def handler(request):
+        assert parse_qs(request.content.decode())["access_token"] == ["x" * 30]
         calls.append(
             (request.url.path, request.headers.get("User-Agent"), request.url.query.decode())
         )
@@ -391,7 +399,7 @@ def test_vk_public_authorization_url_and_direct_audio(client, monkeypatch):
             transport=httpx.MockTransport(handler), trust_env=False
         ),
     )
-    login = client.post("/api/music/vk/login", json={"token": "x" * 30})
+    login = client.post("/api/music/vk/login", json={"token": token_input})
     assert login.status_code == 200
     assert login.json()["tracks"][0]["id"] == "1_2"
     handle = login.json()["session"]
@@ -1140,3 +1148,29 @@ def test_spotify_public_embed_body_is_bounded(client, monkeypatch):
     )
     assert response.status_code == 502
     assert not music.SESSIONS
+
+
+@pytest.mark.parametrize("value", [
+    "https://evil.example/blank.html#access_token=" + "x" * 30,
+    "https://evil.example@oauth.vk.com/blank.html#access_token=" + "x" * 30,
+    "access_token=" + "x" * 30 + "&token=" + "y" * 30,
+    "access_token=",
+])
+def test_vk_token_input_rejects_ambiguous_or_wrong_links(value):
+    with pytest.raises(HTTPException) as exc:
+        music._vk_access_token(value)
+    assert exc.value.status_code == 400
+
+
+@pytest.mark.parametrize("message,subcode,expected", [
+    ("User authorization failed: access_token was given to another ip address", None, "сети входа"),
+    ("User authorization failed", 1130, "сети входа"),
+    ("access token expired", None, "Срок токена"),
+    ("invalid access token", None, "VK отклонил"),
+])
+def test_vk_auth_reason_is_safe_and_distinguishes_expiry(message, subcode, expected):
+    with pytest.raises(HTTPException) as exc:
+        music._vk_error({"error": {"error_code": 5, "error_subcode": subcode,
+                                   "error_msg": message + " SECRET_PROVIDER_VALUE"}})
+    assert expected in exc.value.detail
+    assert "SECRET_PROVIDER_VALUE" not in exc.value.detail

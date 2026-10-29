@@ -160,3 +160,16 @@ test('unready audio waits to align; explicit guest resume can align again', () =
   assert.equal(player.seeks, 2);
   assert.equal(player.plays, 2);
 });
+
+
+test('VK accepts a token, copied assignment, fragment or query without sending URL metadata', () => {
+  const token = 'vk1.a.' + 'a'.repeat(40);
+  for (const input of [token, ` token=${token}&expires_in=0 `,
+    `access_token=${token}`, `#access_token=${token}&user_id=123`,
+    `https://oauth.vk.ru/blank.html?access_token=${token}&user_id=123`,
+    `https://oauth.vk.com/blank.html#access_token=${token}&expires_in=0`]) {
+    assert.equal(vkToken(input), token);
+  }
+  assert.throws(() => vkToken(`access_token=${token}&token=${token}`));
+  assert.throws(() => vkToken('token='));
+});

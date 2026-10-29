@@ -60,15 +60,22 @@ const MUSIC_KEY = 'prada-sound-music';
 function sourceName(id?: string) { return id?.startsWith('yandex_') ? 'Яндекс Музыка' : id?.startsWith('spotify_') ? 'Spotify' : id?.startsWith('sc_') ? 'SoundCloud' : id?.startsWith('vk_') ? 'VK Музыка' : 'YouTube'; }
 function vkAccessToken(input: string) {
   let token = input.trim();
+  let params: URLSearchParams | null = null;
   if (/^https?:\/\//i.test(token)) {
     const url = new URL(token);
     if (url.protocol !== 'https:' || !['oauth.vk.com', 'oauth.vk.ru'].includes(url.hostname) || url.pathname !== '/blank.html' || url.username || url.password)
       throw new Error('Вставьте итоговую ссылку страницы VK с access_token в адресе.');
-    token = new URLSearchParams(url.hash.slice(1)).get('access_token') || '';
+    params = new URLSearchParams(url.hash.slice(1) || url.search.slice(1));
+  } else if (/^[#?]?(?:access_token|token)=/i.test(token)) params = new URLSearchParams(token.replace(/^[#?]/, ''));
+  if (params) {
+    const values = [...params.getAll('access_token'), ...params.getAll('token')];
+    if (values.length !== 1) throw new Error('Нужна ссылка с одним access_token или сам токен VK.');
+    token = values[0];
   }
-  if (!/^[A-Za-z0-9._-]{20,2048}$/.test(token)) throw new Error('В ссылке нет токена VK. Завершите подтверждение доступа и скопируйте итоговый адрес.');
+  if (!/^[A-Za-z0-9._-]{20,2048}$/.test(token)) throw new Error('Не удалось прочитать токен VK. Вставьте полный итоговый адрес, access_token=… или сам токен.');
   return token;
 }
+
 type Profile = { name: string; username: string | null; photo_url: string | null };
 type TelegramWebApp = { initData: string; ready: () => void; expand: () => void;
   openTelegramLink?: (url: string) => void; openLink?: (url: string) => void;
@@ -1841,10 +1848,10 @@ export default function App() {
             </div>}
             {musicProvider === 'vk' && musicCapability?.experimental_token && <>
               {musicCapability.token_authorization_url && <div className="authbox" style={{ marginTop: 14 }}>
-                <p className="muted small">VK покажет приложение «{musicCapability.token_application || 'Kate Mobile'}». Запрашиваем только доступ к музыке. Пароль вводится исключительно на сайте VK.</p>
+                <p className="muted small">VK покажет приложение «{musicCapability.token_application || 'Kate Mobile'}». Запрашиваем музыку и «доступ в любое время», чтобы библиотека загружалась через сервер. Пароль вводится исключительно на сайте VK.</p>
                 <a className="button primary linklike" href={musicCapability.token_authorization_url} target="_blank" rel="noopener noreferrer"
                   onClick={(event) => { if (telegramInitData && telegram?.openLink) { event.preventDefault(); telegram.openLink(musicCapability.token_authorization_url!); } }}>Подтвердить доступ в VK ↗</a>
-                <p className="muted small">После подтверждения скопируйте итоговый адрес страницы с access_token и вставьте ниже. В этом способе VK не возвращает код обратно на наш сайт автоматически.</p>
+                <p className="muted small">Подтвердите также «доступ в любое время». Если раньше появлялась ошибка токена, откройте эту кнопку заново и получите новую ссылку. Можно вставить весь адрес, access_token=… или сам токен.</p>
               </div>}
               <form onSubmit={(event) => { event.preventDefault(); connectVk(); }}>
                 <label className="field">Итоговая ссылка VK или токен музыки<input type="password" autoComplete="off" spellCheck={false} value={vkToken} onChange={(event) => setVkToken(event.target.value)} required /></label>

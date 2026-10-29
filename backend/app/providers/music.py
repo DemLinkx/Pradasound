@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from time import monotonic
 from typing import Any
-from urllib.parse import quote, urlencode, urljoin, urlparse
+from urllib.parse import parse_qs, quote, urlencode, urljoin, urlparse
 
 import httpx
 import yt_dlp  # type: ignore[import-untyped]
@@ -171,12 +171,33 @@ def _vk_authorization_url() -> str | None:
     return "https://oauth.vk.com/authorize?" + urlencode(
         {
             "client_id": client_id,
-            "scope": "8",
+            "scope": "audio,offline",
             "redirect_uri": "https://oauth.vk.com/blank.html",
             "display": "page",
             "response_type": "token",
         }
     )
+
+
+def _vk_access_token(value: str) -> str:
+    token = value.strip()
+    params = None
+    if re.match(r"^https?://", token, re.I):
+        url = urlparse(token)
+        if (url.scheme != "https" or url.hostname not in {"oauth.vk.com", "oauth.vk.ru"}
+                or url.path != "/blank.html" or url.username or url.password):
+            raise HTTPException(400, "Вставьте итоговую ссылку страницы VK или сам токен")
+        params = parse_qs(url.fragment or url.query, keep_blank_values=True)
+    elif re.match(r"^[#?]?(?:access_token|token)=", token, re.I):
+        params = parse_qs(token.lstrip("#?"), keep_blank_values=True)
+    if params is not None:
+        values = params.get("access_token", []) + params.get("token", [])
+        if len(values) != 1:
+            raise HTTPException(400, "Нужна ссылка с одним access_token или сам токен VK")
+        token = values[0]
+    if not re.fullmatch(r"[A-Za-z0-9._-]{20,2048}", token):
+        raise HTTPException(400, "Не удалось прочитать токен VK: вставьте ссылку или сам токен")
+    return token
 
 
 def _proxy() -> str | None:
@@ -1119,9 +1140,7 @@ async def vk_login(body: TokenBody, request: Request) -> dict[str, Any]:
     _check_origin(request)
     if not _value("vk_audio_enabled", False):
         raise HTTPException(503, "VK Audio API не включён: обычный VK ID не даёт доступ к аудио")
-    token = body.token.get_secret_value()
-    if len(token) < 20 or len(token) > 2048:
-        raise HTTPException(400, "Некорректный токен VK")
+    token = _vk_access_token(body.token.get_secret_value())
     async with _client() as client:
         data = await _call(
             client,
@@ -1256,7 +1275,21 @@ def _vk_error(body: dict[str, Any]) -> None:
             "music_provider_error provider=vk code=%s", code if isinstance(code, int) else "unknown"
         )
         if code == 5:
-            raise HTTPException(401, "Токен VK истёк или недействителен; подключитесь снова")
+            error = body["error"]
+            message = str(error.get("error_msg", "")).lower()
+            ip_bound = error.get("error_subcode") == 1130 or "another ip" in message
+            reason = "ip_bound" if ip_bound else "expired" if "expired" in message else "rejected"
+            logging.getLogger("uvicorn.error").warning("music_vk_auth_rejected reason=%s", reason)
+            if ip_bound:
+                raise HTTPException(401, "VK привязал токен к сети входа. Откройте "
+                                    "«Подтвердить доступ в VK» заново, разрешите "
+                                    "«доступ в любое время» и вставьте новую ссылку")
+            if reason == "expired":
+                raise HTTPException(401, "Срок токена VK истёк; получите новую ссылку "
+                                    "через кнопку входа")
+            raise HTTPException(401, "VK отклонил токен: он отозван, неполный или не подходит "
+                                "для сервера. Получите новую ссылку через кнопку входа "
+                                "с «доступом в любое время»")
         if code in {6, 9}:
             raise HTTPException(429, "Лимит VK; попробуйте позже", headers={"Retry-After": "10"})
         if code == 14:
