@@ -26,9 +26,8 @@ from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
 from app.api.healthcheck import router as healthcheck_router
-from app.api.lobby import LOBBIES
+from app.api.lobby import LOBBIES, listener_lobby, telegram_polling_loop
 from app.api.lobby import router as lobby_router
-from app.api.lobby import telegram_polling_loop
 from app.providers.music import router as music_router
 from app.settings import Settings
 
@@ -76,6 +75,7 @@ YOUTUBE_EXTRACT_LIMIT = asyncio.Semaphore(2)
 YOUTUBE_AUDIO_FAILURES: dict[str, tuple[float, str]] = {}
 YOUTUBE_AUDIO_LOCKS: dict[str, asyncio.Lock] = {}
 YOUTUBE_ROUTE_HEALTH: dict[str | None, tuple[float, float]] = {}
+LISTENER_STREAMS: dict[tuple[str, str, int], tuple[float, asyncio.Task[dict[str, Any]]]] = {}
 
 
 class QuietYoutubeLog:
@@ -588,3 +588,47 @@ def yandex_queue_stream(
                 status_code=401, detail="Автору трека нужно заново подключить Яндекс Музыку"
             ) from None
         raise
+
+
+@app.get("/api/listen/{lobby_id}/{item_id}/stream")
+async def listener_stream(
+    lobby_id: str, item_id: str, x_listener_token: str = Header(default="")
+) -> dict[str, Any]:
+    lobby = listener_lobby(lobby_id, x_listener_token)
+    item = next((entry for entry in lobby.queue_items[:2] if entry.id == item_id), None)
+    if item is None:
+        raise HTTPException(404, "Доступны только текущий и следующий треки комнаты")
+    key = (lobby_id, item.id, item.access_revision)
+    now = monotonic()
+    for cached_key, (expiry, task) in list(LISTENER_STREAMS.items()):
+        if expiry < now and task.done():
+            del LISTENER_STREAMS[cached_key]
+    cached = LISTENER_STREAMS.get(key)
+    if cached is None:
+        if len(LISTENER_STREAMS) >= 256:
+            raise HTTPException(503, "Подготовка музыки занята; повторите через несколько секунд")
+
+        async def resolve() -> dict[str, Any]:
+            if item.track_id.startswith("yandex_"):
+                return await run_in_threadpool(
+                    yandex_queue_stream, lobby_id, item_id, lobby.host_token
+                )
+            if item.track_id.startswith(("sc_", "vk_")):
+                from app.providers.music import queue_stream
+                return await queue_stream(lobby_id, item_id, lobby.host_token)
+            if item.track_id.startswith("spotify_"):
+                raise HTTPException(422, "Spotify воспроизводится в личном браузерном плеере")
+            return await prepare_youtube_audio(item.track_id, lobby_id, lobby.host_token)
+
+        cached = (now + 60, asyncio.create_task(resolve()))
+        LISTENER_STREAMS[key] = cached
+    try:
+        result = await asyncio.shield(cached[1])
+    except Exception:
+        if LISTENER_STREAMS.get(key) is cached:
+            LISTENER_STREAMS.pop(key, None)
+        raise
+    listener_lobby(lobby_id, x_listener_token)
+    if not any(entry.id == item_id for entry in lobby.queue_items[:2]):
+        raise HTTPException(409, "Очередь уже переключилась; обновляем плеер")
+    return result

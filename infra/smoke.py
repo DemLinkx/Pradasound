@@ -61,9 +61,23 @@ def check(base: str, audio_enabled: bool = False) -> None:
             guest.send(json.dumps({"action": "add_track", "track_id": "dQw4w9WgXcQ", "title": "Smoke test"}))
             added = state(host)
             assert added["tracks_queue"] == state(guest)["tracks_queue"] == ["dQw4w9WgXcQ"]
+            guest.send(json.dumps({"action": "listen_together", "enabled": True}))
+            access = json.loads(guest.recv(timeout=10))
+            assert access["type"] == "listener_access" and access["token"] != room["host_token"]
+            item_id = added["queue_items"][0]["id"]
+            assert request(f"/api/listen/{room['lobby_id']}/{item_id}/stream")[0] == 403
+            host.send(json.dumps({"action": "playback_sync", "item_id": item_id,
+                                  "expected_revision": added["playback_revision"],
+                                  "position": 12, "duration": 180, "paused": True}))
+            sync = json.loads(guest.recv(timeout=10))
+            assert sync["type"] == "playback_sync" and sync["position"] == 12
+            assert access["token"] not in str(sync) and room["host_token"] not in str(sync)
+            guest.send(json.dumps({"action": "listen_together", "enabled": False}))
+            assert json.loads(guest.recv(timeout=10))["enabled"] is False
             host.send(json.dumps({"action": "skip_track", "expected_revision": added["playback_revision"]}))
             assert state(host)["tracks_queue"] == state(guest)["tracks_queue"] == []
     print("OK: host/member WebSockets, shared queue, skip through reverse proxy")
+    print("OK: opt-in listening, private listener credential, host playback sync")
 
     try:
         with connect(ws_url, origin="https://untrusted.example.invalid", open_timeout=10, proxy=None):

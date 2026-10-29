@@ -205,9 +205,32 @@ class Lobby:
     last_empty: float = field(default_factory=monotonic)
     pending: int = 0
     broadcast_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    listener_tokens: dict[str, str] = field(default_factory=dict)
+    playback: dict[str, object] | None = None
+    sync_serial: int = 0
+    last_sync: float = 0
 
 
 LOBBIES: dict[str, Lobby] = {}
+
+
+def playback_snapshot(lobby: Lobby) -> dict[str, object] | None:
+    state = lobby.playback
+    if (not state or not lobby.queue_items or
+            state.get("item_id") != lobby.queue_items[0].id or
+            state.get("revision") != lobby.playback_revision):
+        return None
+    return state
+
+
+def listener_lobby(lobby_id: str, token: str) -> Lobby:
+    lobby = LOBBIES.get(lobby_id)
+    member_id = lobby.listener_tokens.get(token) if lobby and token else None
+    if not lobby or not member_id or member_id not in lobby.connections:
+        raise HTTPException(403, "Включите «Слушать вместе» в подключённой комнате")
+    if lobby.main_id is None:
+        raise HTTPException(409, "Ждём подключения хоста")
+    return lobby
 
 
 class ConnectionManager:
@@ -239,8 +262,20 @@ class ConnectionManager:
         lobby = LOBBIES[lobby_id]
         lobby.connections.pop(member_id, None)
         lobby.member_owners.pop(member_id, None)
+        for token, member in list(lobby.listener_tokens.items()):
+            if member == member_id:
+                del lobby.listener_tokens[token]
         if lobby.main_id == member_id:
             lobby.main_id = None
+            state = playback_snapshot(lobby)
+            if state:
+                now = time() * 1000
+                position = float(state["position"])
+                if not state["paused"]:
+                    position += max(0, now - float(state["server_time"])) / 1000
+                lobby.sync_serial += 1
+                lobby.playback = {**state, "paused": True, "position": position,
+                                  "server_time": now, "serial": lobby.sync_serial}
         host_owner = lobby.owner_ids.get(lobby.host_token)
         for owner_id in list(lobby.profiles):
             if (
@@ -267,6 +302,21 @@ class ConnectionManager:
         async with LOBBIES[lobby_id].broadcast_lock:
             await self._broadcast(lobby_id)
 
+    async def sync_listeners(self, lobby_id: str) -> None:
+        lobby = LOBBIES[lobby_id]
+        state = playback_snapshot(lobby)
+        if state is None:
+            return
+        targets = [(mid, lobby.connections[mid]) for mid in set(lobby.listener_tokens.values())
+                   if mid in lobby.connections]
+        sent = await asyncio.gather(*(self.send(ws, {"type": "playback_sync", **state})
+                                      for _, ws in targets))
+        for (mid, _), success in zip(targets, sent):
+            if not success:
+                self.disconnect(lobby_id, mid)
+        if not all(sent):
+            await self.broadcast(lobby_id)
+
     async def _broadcast(self, lobby_id: str) -> None:
         lobby = LOBBIES[lobby_id]
         while lobby.connections:
@@ -284,6 +334,8 @@ class ConnectionManager:
                 ],
                 "track_titles": dict(lobby.track_titles),
                 "playback_revision": lobby.playback_revision,
+                "playback": playback_snapshot(lobby),
+                "host_online": lobby.main_id is not None,
                 "queue_revision": lobby.queue_revision,
                 "profiles": dict(lobby.profiles),
                 "main_profile": lobby.profiles.get(lobby.owner_ids.get(lobby.host_token, "")),
@@ -424,7 +476,54 @@ async def lobby_ws(ws: WebSocket, lobby_id: str) -> None:
             if not isinstance(message, dict):
                 await manager.send(ws, {"type": "error", "error": "invalid_message"})
                 continue
-            if message.get("action") == "add_track":
+            if message.get("action") == "listen_together":
+                enabled = message.get("enabled")
+                if type(enabled) is not bool or member_id == lobby.main_id:
+                    await manager.send(ws, {"type": "error", "error": "invalid_listen_mode"})
+                    continue
+                for token, mid in list(lobby.listener_tokens.items()):
+                    if mid == member_id:
+                        del lobby.listener_tokens[token]
+                token = secrets.token_urlsafe(32) if enabled else ""
+                if enabled:
+                    lobby.listener_tokens[token] = member_id
+                await manager.send(ws, {"type": "listener_access", "enabled": enabled,
+                                       "token": token, "server_time": time() * 1000,
+                                       "host_online": lobby.main_id is not None,
+                                       "playback": playback_snapshot(lobby)})
+                continue
+            elif message.get("action") == "playback_ping":
+                stamp = message.get("client_time")
+                if type(stamp) in (int, float) and 0 <= stamp <= 1e15:
+                    await manager.send(ws, {"type": "playback_clock", "client_time": stamp,
+                                           "server_time": time() * 1000})
+                continue
+            elif message.get("action") == "playback_sync":
+                if member_id != lobby.main_id:
+                    await manager.send(ws, {"type": "error", "error": "main_only"})
+                    continue
+                position, duration = message.get("position"), message.get("duration", 0)
+                if (not lobby.queue_items or message.get("item_id") != lobby.queue_items[0].id or
+                        type(message.get("expected_revision")) is not int or
+                        message["expected_revision"] != lobby.playback_revision or
+                        type(message.get("paused")) is not bool or
+                        type(position) not in (int, float) or
+                        not 0 <= position <= 86400 or type(duration) not in (int, float) or
+                        not 0 <= duration <= 86400):
+                    await manager.send(ws, {"type": "error", "error": "stale_playback_sync"})
+                    continue
+                if monotonic() - lobby.last_sync < .05:
+                    continue
+                lobby.last_sync = monotonic()
+                lobby.sync_serial += 1
+                lobby.playback = {"item_id": message["item_id"],
+                                  "revision": lobby.playback_revision,
+                                  "position": position, "duration": duration,
+                                  "paused": message["paused"], "server_time": time() * 1000,
+                                  "serial": lobby.sync_serial}
+                await manager.sync_listeners(lobby_id)
+                continue
+            elif message.get("action") == "add_track":
                 track_id = message.get("track_id")
                 if not isinstance(track_id, str) or not re.fullmatch(
                     r"(?:yandex_[0-9]{1,20}|sc_[0-9]{1,20}|spotify_[A-Za-z0-9]{22}|"

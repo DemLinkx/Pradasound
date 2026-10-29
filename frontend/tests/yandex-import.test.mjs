@@ -14,6 +14,8 @@ function sourceFunction(name) {
 const parse = sourceFunction('yandexPage');
 const vkToken = sourceFunction('vkAccessToken');
 const spotifyPlayback = sourceFunction('spotifyPlayback');
+const listeningPosition = sourceFunction('listeningPosition');
+const playbackSnapshot = sourceFunction('playbackSnapshot');
 
 test('one unusual or malformed entry does not reject all liked tracks', () => {
   const page = parse({ tracks: [
@@ -75,4 +77,21 @@ test('Spotify completion handles an end position and a reset to zero', () => {
   assert.equal(spotifyPlayback({ duration: 176000, position: 0, isPaused: true }, previous, 176000).ended, true);
   assert.equal(spotifyPlayback({ duration: 0, position: 0, isPaused: true }, previous, 176000).ended, true);
   assert.equal(spotifyPlayback({ duration: 176000, position: 0, isPaused: true }, { ...previous, started: false }).ended, false);
+});
+
+test('listening position compensates elapsed network time but never advances a pause', () => {
+  const snapshot = { position: 30, paused: false, duration: 180, server_time: 100000 };
+  assert.equal(listeningPosition(snapshot, 102500), 32.5);
+  assert.equal(listeningPosition({ ...snapshot, paused: true }, 102500), 30);
+  assert.equal(listeningPosition(snapshot, 99900), 30);
+  assert.equal(listeningPosition(snapshot, 500000), 180);
+});
+
+test('invalid playback snapshots cannot seek or poison the listening clock', () => {
+  const snapshot = { item_id: 'a'.repeat(32), revision: 0, serial: 1, position: 30, duration: 180, paused: false, server_time: 100000 };
+  assert.equal(playbackSnapshot(snapshot)?.position, 30);
+  assert.equal(playbackSnapshot({ ...snapshot, position: NaN }), null);
+  assert.equal(playbackSnapshot({ ...snapshot, position: -1 }), null);
+  assert.equal(playbackSnapshot({ ...snapshot, server_time: Infinity }), null);
+  assert.equal(playbackSnapshot({ ...snapshot, revision: 1.5 }), null);
 });

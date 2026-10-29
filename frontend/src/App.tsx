@@ -35,6 +35,20 @@ function yandexPage(value: unknown) {
 }
 type YandexLogin = { login_id: string; verification_url: string; user_code: string; interval: number; expires_in: number };
 type QueueItem = { id: string; track_id: string; owner_id: string; access_revision?: number; canonical_url?: string; duration_ms?: number };
+type PlaybackSync = { item_id: string; revision: number; position: number; duration: number; paused: boolean; server_time: number; serial: number };
+function playbackSnapshot(value: unknown): PlaybackSync | null {
+  if (!value || typeof value !== 'object') return null;
+  const s = value as Partial<PlaybackSync>;
+  return typeof s.item_id === 'string' && /^[a-f0-9]{32}$/.test(s.item_id) &&
+    Number.isSafeInteger(s.revision) && s.revision! >= 0 && Number.isSafeInteger(s.serial) && s.serial! >= 0 &&
+    typeof s.paused === 'boolean' && typeof s.position === 'number' && s.position >= 0 && s.position <= 86400 &&
+    typeof s.duration === 'number' && s.duration >= 0 && s.duration <= 86400 && Number.isFinite(s.server_time)
+    ? s as PlaybackSync : null;
+}
+function listeningPosition(s: PlaybackSync, serverNow: number) {
+  const position = s.position + (s.paused ? 0 : Math.max(0, serverNow - s.server_time) / 1000);
+  return Math.max(0, Math.min(s.duration > 0 ? s.duration : 86400, position));
+}
 type MusicProvider = 'spotify' | 'soundcloud' | 'vk';
 type MusicTrack = { id: string; title: string; artist: string; canonical_url: string; playable: boolean; reason?: string };
 type MusicLibrary = { session: string; authenticated: boolean; tracks: MusicTrack[]; next_cursor: string | null; has_more: boolean; library_error?: string; library_error_status?: number; retry_after?: number; quota_reason?: string; import_notice?: string; empty_library?: boolean; account_url?: string };
@@ -393,6 +407,17 @@ export default function App() {
   const [playingKey, setPlayingKey] = useState('');
   const [playbackTime, setPlaybackTime] = useState(0);
   const [playbackDuration, setPlaybackDuration] = useState(0);
+  const [listenTogether, setListenTogether] = useState(false);
+  const [listenerToken, setListenerToken] = useState('');
+  const [hostOnline, setHostOnline] = useState(false);
+  const [remotePlayback, setRemotePlayback] = useState<PlaybackSync | null>(null);
+  const [listenPaused, setListenPaused] = useState(false);
+  const listenWanted = useRef(false);
+  const clockOffset = useRef(0);
+  const spotifyProgress = useRef({ key: '', position: 0, duration: 0, paused: true, at: 0 });
+  const remoteRef = useRef(remotePlayback); remoteRef.current = remotePlayback;
+  const localPause = useRef(listenPaused); localPause.current = listenPaused;
+  const listenerError = useRef('');
   const [volume, setVolume] = useState(80);
   const volumeRef = useRef(0.8);
   const previousVolume = useRef(80);
@@ -438,6 +463,13 @@ export default function App() {
     setPlaybackTime(Number.isFinite(player.currentTime) ? player.currentTime : 0);
     setPlaybackDuration(Number.isFinite(player.duration) ? player.duration : 0);
   }
+
+  useEffect(() => {
+    listenWanted.current = false; setListenTogether(false); setListenerToken('');
+    setRemotePlayback(null); setListenPaused(false);
+  }, [session?.lobby_id, session?.role]);
+
+  useEffect(() => { listenerError.current = audioError; }, [audioError]);
 
   function setPlayerVolume(value: number) {
     const next = Math.max(0, Math.min(100, value));
@@ -640,6 +672,20 @@ export default function App() {
             'owner_id' in message && typeof message.owner_id === 'string' &&
             /^[a-f0-9]{32}$/.test(message.owner_id)) {
           setOwnerId(message.owner_id);
+        } else if ('type' in message && message.type === 'listener_access' && 'enabled' in message && typeof message.enabled === 'boolean') {
+          if (!message.enabled) { setListenerToken(''); return; }
+          if (!listenWanted.current || !('token' in message) || typeof message.token !== 'string' || !/^[A-Za-z0-9_-]{32,128}$/.test(message.token)) return;
+          if ('server_time' in message && typeof message.server_time === 'number' && Number.isFinite(message.server_time)) clockOffset.current = message.server_time - Date.now();
+          setListenerToken(message.token);
+          setHostOnline('host_online' in message && message.host_online === true);
+          setRemotePlayback('playback' in message ? playbackSnapshot(message.playback) : null);
+        } else if ('type' in message && message.type === 'playback_clock' && 'client_time' in message && typeof message.client_time === 'number' &&
+            'server_time' in message && typeof message.server_time === 'number' && Number.isFinite(message.server_time)) {
+          const elapsed = Date.now() - message.client_time;
+          if (elapsed >= 0 && elapsed < 10000) clockOffset.current = message.server_time - (message.client_time + Date.now()) / 2;
+        } else if ('type' in message && message.type === 'playback_sync') {
+          const snapshot = playbackSnapshot(message);
+          if (snapshot) setRemotePlayback((previous) => !previous || snapshot.serial > previous.serial ? snapshot : previous);
         } else if ('type' in message && message.type === 'lobby_state' &&
             'lobby_id' in message && message.lobby_id === session.lobby_id &&
             'queue_items' in message && Array.isArray(message.queue_items) &&
@@ -654,6 +700,11 @@ export default function App() {
             'queue_revision' in message && typeof message.queue_revision === 'number' &&
             Number.isSafeInteger(message.queue_revision) && message.queue_revision >= 0) {
           setQueueItems(message.queue_items as QueueItem[]);
+          setHostOnline('host_online' in message && message.host_online === true);
+          const snapshot = 'playback' in message ? playbackSnapshot(message.playback) : null;
+          const head = (message.queue_items as QueueItem[])[0];
+          setRemotePlayback((previous) => snapshot ? !previous || snapshot.serial > previous.serial ? snapshot : previous :
+            previous?.item_id === head?.id && previous?.revision === message.playback_revision ? previous : null);
           if ('profiles' in message && message.profiles && typeof message.profiles === 'object')
             setProfiles(message.profiles as Record<string, Profile>);
           if ('main_profile' in message) setMainProfile(message.main_profile as Profile | null);
@@ -677,6 +728,7 @@ export default function App() {
     ws.onclose = (event) => {
       if (!active) return;
       setStatus('closed');
+      setListenerToken('');
       setQueueActionPending(false);
       setError(`Соединение закрыто (${event.code})${event.reason ? `: ${event.reason}` : ''}.`);
       if (event.code !== 1008 && retryCount.current < 8) {
@@ -707,6 +759,8 @@ export default function App() {
   const currentTrack = currentItem?.track_id;
   const isSpotify = currentTrack?.startsWith('spotify_') === true;
   const currentKey = `${playbackRevision}:${currentItem?.id}`;
+  const playbackDevice = session?.role === 'Main' || Boolean(listenTogether && listenerToken && hostOnline && status === 'connected');
+  const renderPlayer = session?.role === 'Main' || listenTogether;
   const nextItem = queueItems[1];
   const nextTrack = nextItem?.track_id;
   const playbackCredential = currentTrack && !VIDEO_ID.test(currentTrack)
@@ -716,6 +770,14 @@ export default function App() {
   const audioCacheKey = (item: QueueItem) => `${item.id}:${item.access_revision || 0}`;
   async function resolveAudio(item: QueueItem, signal: AbortSignal): Promise<string> {
     if (item.track_id.startsWith('spotify_')) throw new Error('Оригинал Spotify воспроизводится в его встроенном плеере.');
+    if (session?.role === 'Member') {
+      if (!listenerToken) throw new Error('Включите «Слушать вместе».');
+      const response = await fetch(`/api/listen/${session.lobby_id}/${item.id}/stream`, { signal, headers: { 'X-Listener-Token': listenerToken } });
+      const data: { url?: string; detail?: string } = await response.json();
+      if (!response.ok || !data.url) throw new Error(data.detail || 'Не удалось подготовить музыку для слушателя.');
+      if (!(data.url.startsWith('/api/music/') || data.url.startsWith('/api/youtube/audio/file/') || new URL(data.url).protocol === 'https:')) throw new Error('Некорректная аудиоссылка.');
+      return data.url;
+    }
     const yandex = item.track_id.startsWith('yandex_');
     const music = item.track_id.startsWith('sc_') || item.track_id.startsWith('vk_');
     if (!session?.host_token || !session.lobby_id) throw new Error('Нет доступа хоста к воспроизведению.');
@@ -767,7 +829,12 @@ export default function App() {
     } else { player.src = url; player.load(); }
   }
   useEffect(() => () => hlsPlayers.current.forEach((hls) => hls?.destroy()), []);
-  useEffect(() => { preparedAudio.current.clear(); }, [session?.lobby_id, session?.host_token]);
+  useEffect(() => { preparedAudio.current.clear(); }, [session?.lobby_id, session?.host_token, listenerToken]);
+  useEffect(() => {
+    if (!renderPlayer) return;
+    const players = audioPlayers.map((ref) => ref.current);
+    return () => { players.forEach((player) => { if (player) { player.pause(); player.removeAttribute('src'); player.load(); } }); };
+  }, [renderPlayer]);
   useEffect(() => {
     const promotion = promoting.current;
     if (promotion && currentItem?.id === promotion.id && playbackRevision === promotion.revision) {
@@ -802,7 +869,7 @@ export default function App() {
     setAudioUrl('');
     setAudioError('');
     setFallbackId('');
-    if (session?.role !== 'Main' || !currentItem || isSpotify) return;
+    if (!playbackDevice || !currentItem || isSpotify) return;
     const controller = new AbortController();
     void (async () => {
       try {
@@ -814,7 +881,8 @@ export default function App() {
           if (player) {
             await loadAudio(slot, url, controller.signal);
             if (controller.signal.aborted) return;
-            player.volume = volumeRef.current; void player.play().catch(() => { if (!controller.signal.aborted) setAudioError('Нажмите ▶, чтобы начать воспроизведение.'); });
+            player.volume = volumeRef.current;
+            if (session?.role === 'Main') void player.play().catch(() => { if (!controller.signal.aborted) setAudioError('Нажмите ▶, чтобы начать воспроизведение.'); });
           }
           setAudioUrl(url);
         }
@@ -828,10 +896,10 @@ export default function App() {
       }
     })();
     return () => controller.abort();
-  }, [currentItem?.id, playbackRevision, session?.role, session?.lobby_id, playbackCredential, streamAttempt]);
+  }, [currentItem?.id, playbackRevision, session?.role, session?.lobby_id, playbackCredential, streamAttempt, playbackDevice, listenerToken]);
 
   useEffect(() => {
-    if (session?.role !== 'Main') return;
+    if (!playbackDevice) return;
     if (promoting.current && playbackRevision < promoting.current.revision) return;
     if (fading.current && preloaded.current?.id !== nextItem?.id) {
       fading.current = false;
@@ -860,7 +928,7 @@ export default function App() {
       } catch {}
     })();
     return () => controller.abort();
-  }, [currentKey, nextItem?.id, activeAudio, session?.role, session?.lobby_id, nextCredential]);
+  }, [currentKey, nextItem?.id, activeAudio, session?.role, session?.lobby_id, nextCredential, playbackDevice, listenerToken]);
 
   useEffect(() => {
     if (session?.role !== 'Main' || !audioUrl || playingKey !== currentKey) return;
@@ -876,7 +944,7 @@ export default function App() {
 
   useEffect(() => {
     setSpotifyReady(false);
-    if (!isSpotify || session?.role !== 'Main' || !currentItem || !spotifyMount.current) return;
+    if (!isSpotify || !playbackDevice || !currentItem || !spotifyMount.current) return;
     let active = true;
     let controller: SpotifyController | null = null;
     let progress: SpotifyProgress = { position: 0, duration: 0, started: false };
@@ -895,7 +963,7 @@ export default function App() {
         player.addListener('ready', () => {
           if (!active) return;
           setSpotifyReady(true);
-          if (volumeRef.current > 0) try { player.play(); } catch { setAudioError('Нажмите ▶ в плеере Spotify, чтобы начать.'); }
+          if (session?.role === 'Main' && volumeRef.current > 0) try { player.play(); } catch { setAudioError('Нажмите ▶ в плеере Spotify, чтобы начать.'); }
         });
         player.addListener('playback_update', ({ data }) => {
           if (!active || !data) return;
@@ -914,6 +982,8 @@ export default function App() {
             return;
           }
           progress = next;
+          spotifyProgress.current = { key: currentKey, position: next.position / 1000, duration: next.duration / 1000,
+            paused: !next.playing, at: performance.now() };
           setPlaybackDuration(next.duration / 1000); setPlaybackTime(next.position / 1000);
           setPlayingKey(next.playing ? currentKey : '');
           if (next.playing) setAudioError('');
@@ -927,13 +997,13 @@ export default function App() {
       if (spotifyPlayer.current === controller) spotifyPlayer.current = null;
       mount.replaceChildren();
     };
-  }, [currentKey, session?.role, session?.lobby_id, streamAttempt]);
+  }, [currentKey, session?.role, session?.lobby_id, streamAttempt, playbackDevice]);
 
   useEffect(() => {
-    if (!fallbackId || fallbackId !== currentTrack || session?.role !== 'Main' || !ytMount.current) return;
+    if (!fallbackId || fallbackId !== currentTrack || !playbackDevice || !ytMount.current) return;
     let active = true;
     const startupTimer = window.setTimeout(() => {
-      if (active) { setAudioError('YouTube не начал воспроизведение. Переходим к следующему треку.'); skipTrack(); }
+      if (active && session?.role === 'Main') { setAudioError('YouTube не начал воспроизведение. Переходим к следующему треку.'); skipTrack(); }
     }, 15000);
     void youtubeApi().then((api) => {
       if (!active || !ytMount.current) return;
@@ -941,14 +1011,14 @@ export default function App() {
       ytMount.current.append(mount);
       ytPlayer.current = new api.Player(mount, {
         videoId: fallbackId, width: 220, height: 200,
-        playerVars: { autoplay: 1, playsinline: 1, controls: 0, origin: location.origin },
+        playerVars: { autoplay: session?.role === 'Main' ? 1 : 0, playsinline: 1, controls: 0, origin: location.origin },
         events: {
-          onReady: (event) => { if (active) { ytPlayer.current = event.target; event.target.setVolume(volumeRef.current * 100); event.target.playVideo(); } },
+          onReady: (event) => { if (active) { ytPlayer.current = event.target; event.target.setVolume(volumeRef.current * 100); if (session?.role === 'Main') event.target.playVideo(); } },
           onStateChange: (event) => {
             if (!active) return;
             if (event.data === 1) { clearTimeout(startupTimer); setPlayingKey(currentKey); }
             if (event.data === 2) setPlayingKey('');
-            if (event.data === 0) skipTrack();
+            if (event.data === 0) { setPlayingKey(''); skipTrack(); }
           },
           onError: (event) => {
             if (!active) return;
@@ -966,10 +1036,10 @@ export default function App() {
       ytPlayer.current = null;
       ytMount.current?.replaceChildren();
     };
-  }, [fallbackId, currentKey, session?.role]);
+  }, [fallbackId, currentKey, session?.role, playbackDevice]);
 
   useEffect(() => {
-    if (!currentTrack || fallbackId !== currentTrack || session?.role !== 'Main') return;
+    if (!currentTrack || fallbackId !== currentTrack || !playbackDevice) return;
     const timer = window.setInterval(() => {
       const player = ytPlayer.current;
       if (!player || typeof player.getDuration !== 'function' || typeof player.getCurrentTime !== 'function') return;
@@ -979,7 +1049,102 @@ export default function App() {
       setPlaybackTime(Number.isFinite(time) ? time : 0);
     }, 400);
     return () => clearInterval(timer);
-  }, [fallbackId, currentTrack, session?.role]);
+  }, [fallbackId, currentTrack, session?.role, playbackDevice]);
+
+  useEffect(() => {
+    if (session?.role !== 'Member' || status !== 'connected' || socket.current?.readyState !== WebSocket.OPEN) return;
+    const ws = socket.current;
+    ws.send(JSON.stringify({ action: 'listen_together', enabled: listenTogether }));
+    if (!listenTogether) { setListenerToken(''); return; }
+    const ping = () => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ action: 'playback_ping', client_time: Date.now() })); };
+    ping(); const timer = setInterval(ping, 15000);
+    return () => clearInterval(timer);
+  }, [listenTogether, status, session?.role, session?.lobby_id]);
+
+  function localPlayback() {
+    if (isSpotify) {
+      const s = spotifyProgress.current;
+      if (s.key !== currentKey) return { position: 0, duration: 0, paused: true };
+      return { position: s.position + (s.paused ? 0 : (performance.now() - s.at) / 1000), duration: s.duration, paused: s.paused };
+    }
+    if (fallbackId === currentTrack && currentTrack) {
+      try { return { position: ytPlayer.current?.getCurrentTime() || 0, duration: ytPlayer.current?.getDuration() || 0, paused: playingKey !== currentKey }; }
+      catch { return { position: 0, duration: 0, paused: true }; }
+    }
+    const player = audioPlayers[activeAudioRef.current].current;
+    return player && slotKeys.current[activeAudioRef.current] === currentKey ?
+      { position: player.currentTime, duration: Number.isFinite(player.duration) ? player.duration : 0, paused: player.paused } :
+      { position: 0, duration: 0, paused: true };
+  }
+
+  function publishHostPlayback(position?: number) {
+    if (session?.role !== 'Main' || !currentItem || status !== 'connected' || socket.current?.readyState !== WebSocket.OPEN) return;
+    const state = localPlayback();
+    socket.current.send(JSON.stringify({ action: 'playback_sync', item_id: currentItem.id, expected_revision: playbackRevision,
+      position: Math.max(0, Math.min(86400, position ?? state.position)), duration: Math.max(0, Math.min(86400, state.duration)), paused: state.paused }));
+  }
+
+  useEffect(() => {
+    if (session?.role !== 'Main' || status !== 'connected' || !currentItem) return;
+    publishHostPlayback(); const timer = setInterval(() => publishHostPlayback(), 2000);
+    return () => clearInterval(timer);
+  }, [currentKey, playingKey, audioUrl, fallbackId, session?.role, status]);
+
+  function syncListener(force = false) {
+    if (session?.role !== 'Member' || !playbackDevice || !listenWanted.current || listenerError.current && !force) return;
+    const snapshot = remoteRef.current;
+    if (!snapshot || snapshot.item_id !== currentItem?.id || snapshot.revision !== playbackRevision) return;
+    const target = listeningPosition(snapshot, Date.now() + clockOffset.current);
+    const paused = snapshot.paused || localPause.current || snapshot.duration > 0 && target >= snapshot.duration - .05;
+    const actual = localPlayback();
+    try {
+      if (isSpotify) {
+        const player = spotifyPlayer.current;
+        if (!player || !spotifyReady) return;
+        if (Math.abs(actual.position - target) > 1.2) player.seek(Math.floor(target));
+        if (paused) { if (!actual.paused) player.pause(); }
+        else if (actual.paused) player.play();
+      } else if (fallbackId === currentTrack) {
+        const player = ytPlayer.current;
+        if (!player || typeof player.getCurrentTime !== 'function') return;
+        if (Math.abs(actual.position - target) > 1.2) player.seekTo(target, true);
+        if (paused) { if (!actual.paused) player.pauseVideo(); }
+        else if (actual.paused) player.playVideo();
+      } else {
+        const player = audioPlayers[activeAudioRef.current].current;
+        if (!player || player.readyState < HTMLMediaElement.HAVE_METADATA || slotKeys.current[activeAudioRef.current] !== currentKey) return;
+        const difference = target - player.currentTime;
+        if (Math.abs(difference) > 1.2) { player.currentTime = target; player.playbackRate = 1; }
+        else player.playbackRate = paused || Math.abs(difference) < .15 ? 1 : Math.max(.97, Math.min(1.03, 1 + difference * .025));
+        if (paused) { if (!player.paused) player.pause(); }
+        else if (player.paused) void player.play().catch(() => {
+          if (listenWanted.current && slotKeys.current[activeAudioRef.current] === currentKey) {
+            listenerError.current = 'Нажмите ▶, чтобы разрешить звук на этом устройстве.'; setAudioError(listenerError.current);
+          }
+        });
+      }
+    } catch { if (force) setAudioError('Нажмите ▶ в плеере, чтобы разрешить воспроизведение.'); }
+  }
+
+  useEffect(() => {
+    if (session?.role !== 'Member' || !playbackDevice) return;
+    syncListener(); const timer = setInterval(() => syncListener(), 1000);
+    const resume = () => { if (document.visibilityState === 'visible') syncListener(); };
+    document.addEventListener('visibilitychange', resume);
+    return () => { clearInterval(timer); document.removeEventListener('visibilitychange', resume); };
+  }, [currentKey, playbackDevice, remotePlayback, audioUrl, spotifyReady, fallbackId, playingKey, listenPaused, audioError]);
+
+  function toggleListenTogether() {
+    const enabled = !listenTogether;
+    listenWanted.current = enabled; localPause.current = false;
+    setListenPaused(false); setAudioError(''); listenerError.current = '';
+    if (!enabled) {
+      audioPlayers.forEach((ref) => ref.current?.pause());
+      ytPlayer.current?.pauseVideo(); spotifyPlayer.current?.pause();
+      setListenerToken('');
+    }
+    setListenTogether(enabled);
+  }
 
   async function createParty() {
     if (!telegramReady) return;
@@ -1327,8 +1492,13 @@ export default function App() {
   }
 
   function togglePlayback() {
-    if (!currentTrack || session?.role !== 'Main') return;
+    if (!currentTrack || !playbackDevice) return;
     setAudioError('');
+    if (session?.role === 'Member') {
+      const paused = playingKey === currentKey;
+      localPause.current = paused; setListenPaused(paused); listenerError.current = '';
+      syncListener(true); return;
+    }
     if (isSpotify) { spotifyPlayer.current?.togglePlay(); return; }
     if (fallbackId === currentTrack) {
       if (playingKey === currentKey) ytPlayer.current?.pauseVideo();
@@ -1349,7 +1519,7 @@ export default function App() {
   }
 
   function seekPlayback(seconds: number) {
-    if (!currentTrack || !playbackDuration) return;
+    if (!currentTrack || !playbackDuration || session?.role !== 'Main') return;
     const target = Math.max(0, Math.min(seconds, playbackDuration));
     setPlaybackTime(target);
     if (isSpotify) spotifyPlayer.current?.seek(Math.floor(target));
@@ -1358,6 +1528,7 @@ export default function App() {
       const current = audioPlayers[activeAudioRef.current].current;
       if (current && Number.isFinite(current.duration)) current.currentTime = target;
     }
+    publishHostPlayback(target);
   }
 
   function changeQueue(action: 'remove_track' | 'move_track', itemId: string, toIndex?: number) {
@@ -1386,7 +1557,7 @@ export default function App() {
   }
 
   function maybeCrossfade(slot: number) {
-    if (slot !== activeAudioRef.current || slotKeys.current[slot] !== currentKey ||
+    if (session?.role !== 'Main' || slot !== activeAudioRef.current || slotKeys.current[slot] !== currentKey ||
         fading.current || skipSent.current === currentKey) return;
     const old = audioPlayers[slot].current;
     const ready = preloaded.current;
@@ -1462,16 +1633,22 @@ export default function App() {
             {mainProfile?.username && <small>{mainProfile.name}</small>}</div>
           <span className="hostbadge">MAIN</span>
         </section>
-        {session.role === 'Member' && <section className="card cardpad hero">
+        {session.role === 'Member' && <section className="card cardpad">
+          <div className="sectionhead"><div><span className="eyebrow">СЛУШАТЬ ВМЕСТЕ</span><h3>{listenTogether ? 'Музыка на вашем устройстве' : 'Сейчас звук только у хоста'}</h3></div>
+            <button className={`button ${listenTogether ? '' : 'primary'}`} disabled={status !== 'connected'} onClick={toggleListenTogether}>{listenTogether ? 'Выключить у себя' : 'Слушать вместе'}</button></div>
+          <p className="muted small">{listenTogether ? status !== 'connected' ? 'Восстанавливаем соединение. Звук приостановлен.' : !hostOnline ? 'Ждём подключения хоста.' : listenPaused ? 'У вас пауза. Нажмите ▶, чтобы продолжить вместе с хостом.' : 'Следуем за хостом: общая песня, пауза и перемотка. Возможна небольшая задержка.' : 'Включите звук в своих наушниках, сохранив общую очередь.'}</p>
+          {listenTogether && isSpotify && <p className="muted small">Для оригиналов Spotify нужен собственный доступ к полным трекам в этом браузере. Вход хоста не передаётся гостям.</p>}
+        </section>}
+        {session.role === 'Member' && !listenTogether && <section className="card cardpad hero">
           <div className="heroText"><span className="eyebrow">{currentTrack ? 'СЕЙЧАС ИГРАЕТ' : 'ГОТОВО К СТАРТУ'}</span>
             <h2>{nowTitle}</h2><p className="muted small">{currentTrack ? sourceName(currentTrack) : 'Добавьте первый трек в очередь'}</p>
             {currentTrack && <div className="bars" aria-hidden="true">{Array.from({ length: 20 }, (_, i) => <i key={i} />)}</div>}
           </div>
           <div className="art" aria-hidden="true">{currentTrack && VIDEO_ID.test(currentTrack) ? <img src={`https://i.ytimg.com/vi/${currentTrack}/hqdefault.jpg`} alt="" /> : <span className="record" />}</div>
         </section>}
-        {session.role === 'Main' && <section className="card deck" aria-label="Плеер хоста">
+        {renderPlayer && <section className="card deck" aria-label={session.role === 'Main' ? 'Плеер хоста' : 'Ваш плеер: слушаем вместе'}>
           <div className="deck-stage">
-            <div className="deck-stage-copy"><div className="deck-status"><span className="eyebrow">{currentTrack ? 'СЕЙЧАС ИГРАЕТ' : 'ПЛЕЕР ХОСТА'}</span>
+            <div className="deck-stage-copy"><div className="deck-status"><span className="eyebrow">{currentTrack ? 'СЕЙЧАС ИГРАЕТ' : session.role === 'Main' ? 'ПЛЕЕР ХОСТА' : 'ВАШ ПЛЕЕР'}</span>
               <span className={`deck-onair ${playingKey === currentKey && currentTrack ? 'playing' : ''}`}><i />{playingKey === currentKey && currentTrack ? 'В ЭФИРЕ' : 'ОЖИДАНИЕ'}</span></div>
               <h2>{currentTrack ? nowTitle : 'Очередь пока пуста'}</h2>
               <p>{currentTrack ? sourceName(currentTrack) : 'Добавьте первый трек, чтобы начать.'}</p>
@@ -1489,18 +1666,18 @@ export default function App() {
           <div className="deck-timeline">
             <span>{clockTime(playbackTime)}</span>
             <input className="deck-range" type="range" min="0" max={Math.max(1, playbackDuration)} step="0.1"
-              value={Math.min(playbackTime, Math.max(1, playbackDuration))} disabled={!currentTrack || playbackDuration <= 0}
+              value={Math.min(playbackTime, Math.max(1, playbackDuration))} disabled={session.role !== 'Main' || !currentTrack || playbackDuration <= 0}
               style={{ '--fill': `${playbackDuration ? playbackTime / playbackDuration * 100 : 0}%` } as CSSProperties}
               aria-label="Позиция трека" onChange={(event) => seekPlayback(Number(event.target.value))} />
             <span>{clockTime(playbackDuration)}</span>
           </div>
           <div className="deck-controls">
             <button className="deck-play" aria-label={playingKey === currentKey ? 'Пауза' : 'Воспроизвести'}
-              disabled={!currentTrack || (isSpotify ? !spotifyReady : !audioUrl && fallbackId !== currentTrack)} onClick={togglePlayback}>
+              disabled={!playbackDevice || !currentTrack || (isSpotify ? !spotifyReady : !audioUrl && fallbackId !== currentTrack)} onClick={togglePlayback}>
               {playingKey === currentKey && currentTrack ? <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="4" width="4" height="16" rx="1" /><rect x="14" y="4" width="4" height="16" rx="1" /></svg> :
                 <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 4.7a1 1 0 0 1 1.5-.86l11 7.3a1 1 0 0 1 0 1.72l-11 7.3A1 1 0 0 1 8 19.3z" /></svg>}
             </button>
-            <button className="deck-next" disabled={status !== 'connected' || !currentTrack} onClick={() => {
+            {session.role === 'Main' && <><button className="deck-next" disabled={status !== 'connected' || !currentTrack} onClick={() => {
               if (fading.current) {
                 fading.current = false;
                 if (fadeFrame.current !== null) cancelAnimationFrame(fadeFrame.current);
@@ -1510,7 +1687,7 @@ export default function App() {
             }} aria-label="Следующий трек" title="Следующий трек">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m5 5 10 7L5 19V5Z" /><path d="M19 5v14" /></svg>
             </button>
-            <span className="deck-next-label">Следующий трек</span>
+            <span className="deck-next-label">Следующий трек</span></>}
             {!isSpotify && <div className="deck-volume">
               <button className="deck-volume-icon" aria-label={volume === 0 ? 'Включить звук' : 'Выключить звук'}
                 onClick={() => setPlayerVolume(volume === 0 ? previousVolume.current : 0)}>
@@ -1527,10 +1704,11 @@ export default function App() {
             onPlay={() => { if (slot === activeAudioRef.current && slotKeys.current[slot] === currentKey) setPlayingKey(currentKey);
               else if (!fading.current) audioPlayers[slot].current?.pause(); }}
             onPause={() => { if (slot === activeAudioRef.current && slotKeys.current[slot] === currentKey && !fading.current && !promoting.current) setPlayingKey(''); }}
-            onLoadedMetadata={(event) => { if (slot === activeAudioRef.current && slotKeys.current[slot] === currentKey) syncPlaybackTime(event.currentTarget); }}
+            onLoadedMetadata={(event) => { if (slot === activeAudioRef.current && slotKeys.current[slot] === currentKey) { syncPlaybackTime(event.currentTarget); syncListener(); } }}
             onDurationChange={(event) => { if (slot === activeAudioRef.current && slotKeys.current[slot] === currentKey) syncPlaybackTime(event.currentTarget); }}
             onTimeUpdate={(event) => { if (slot === activeAudioRef.current && slotKeys.current[slot] === currentKey) syncPlaybackTime(event.currentTarget); maybeCrossfade(slot); }}
             onEnded={() => { if (slot === activeAudioRef.current && slotKeys.current[slot] === currentKey) {
+              if (session.role !== 'Main') { setPlayingKey(''); return; }
               const next = preloaded.current && audioPlayers[preloaded.current.slot].current;
               if (fading.current && next && !next.paused) finishFade();
               else { fading.current = false; skipTrack(); }
@@ -1551,9 +1729,10 @@ export default function App() {
               }
             } }} />)}
           <div className="deck-message">{currentTrack ? <>
-            {isSpotify && <p className="muted small">Воспроизведение оригинала через Spotify в браузере хоста. Полный доступ может требовать входа в его плеере и Premium. Громкость регулируется в Spotify или на устройстве; переход к следующему треку — без мешапа.</p>}
+            {isSpotify && <p className="muted small">Воспроизведение оригинала через Spotify в этом браузере. Полный доступ может требовать входа в его плеере и Premium. Громкость регулируется в Spotify или на устройстве; переход к следующему треку — без мешапа.</p>}
             {fallbackId === currentTrack && <p className="muted small">Аудиопоток YouTube недоступен — пробуем встроенный плеер.</p>}
-            {fallbackId === currentTrack && <button className="button tiny" onClick={() => { if (typeof ytPlayer.current?.playVideo === 'function') ytPlayer.current.playVideo(); }}>Запустить YouTube</button>}
+            {fallbackId === currentTrack && session.role === 'Main' && <button className="button tiny" onClick={() => { if (typeof ytPlayer.current?.playVideo === 'function') ytPlayer.current.playVideo(); }}>Запустить YouTube</button>}
+            {session.role === 'Member' && !remotePlayback && <p className="muted small">Ждём позицию воспроизведения от хоста…</p>}
             {audioError && <p className="notice" role="alert">{audioError}</p>}
             {isYandex && audioError && currentItem?.owner_id !== ownerId && <p className="muted small">
               Доступ к этому треку предоставляет {profileLabel(profiles[currentItem.owner_id])}. Если доступ истёк, попросите автора подключить Яндекс Музыку заново.</p>}
