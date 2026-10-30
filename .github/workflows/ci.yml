@@ -35,8 +35,10 @@ jobs:
         run: |
           python -m pip install uv==0.12.19
           uv sync --project backend --locked --python 3.12
-      - name: Backend tests
-        run: uv run --directory backend --locked pytest
+      - name: Backend and maintenance tests
+        run: |
+          uv run --directory backend --locked pytest
+          uv run --project backend --locked pytest infra/tests
       - name: Image names
         shell: bash
         run: |
