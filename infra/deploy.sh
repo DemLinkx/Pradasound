@@ -18,3 +18,5 @@ esac
 
 docker compose up -d --no-build --wait --wait-timeout 120
 docker compose ps
+# Only after successful health checks; keeps running and previous SHA images.
+python3 infra/prune_images.py || printf '%s\n' 'Не удалось очистить старые образы; приложение работает.' >&2

@@ -14,10 +14,6 @@ COPY backend/pyproject.toml backend/uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --locked --no-dev
 
 FROM python:3.12-slim-bookworm AS runtime
-ARG SOURCE_URL=""
-ARG REVISION="local"
-LABEL org.opencontainers.image.source=$SOURCE_URL \
-      org.opencontainers.image.revision=$REVISION
 ENV PATH="/app/backend/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
     DENO_DIR=/tmp/deno DENO_NO_UPDATE_CHECK=1 \
@@ -34,3 +30,8 @@ EXPOSE 8000
 HEALTHCHECK --interval=15s --timeout=3s --start-period=15s --retries=3 \
     CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthcheck', timeout=2).close()"]
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--ws", "websockets", "--ws-max-size", "16384", "--ws-max-queue", "4", "--ws-per-message-deflate", "false", "--proxy-headers", "--forwarded-allow-ips", "*", "--no-access-log", "--timeout-graceful-shutdown", "15"]
+
+ARG SOURCE_URL=""
+ARG REVISION="local"
+LABEL org.opencontainers.image.source=$SOURCE_URL \
+      org.opencontainers.image.revision=$REVISION
