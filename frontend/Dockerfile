@@ -4,6 +4,7 @@ WORKDIR /app
 COPY frontend/package.json frontend/package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm npm ci
 COPY frontend/index.html frontend/tsconfig.json frontend/vite.config.ts ./
+COPY frontend/public ./public
 COPY frontend/src ./src
 COPY frontend/tests ./tests
 RUN npm test && npm run build
