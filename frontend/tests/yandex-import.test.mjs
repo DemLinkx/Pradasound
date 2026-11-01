@@ -107,7 +107,7 @@ function listenerHarness() {
   const context = { session: { role: 'Member' }, playbackDevice: true, listenWanted: { current: true },
     listenerError: { current: '' }, remoteRef: { current: snapshot }, currentItem: { id: snapshot.item_id },
     playbackRevision: 0, currentKey: 'track:0', listenerToken: 'private-listener', streamAttempt: 0,
-    fallbackId: '', currentTrack: 'track', listenerApplied: { current: '' }, clockOffset: { current: 0 },
+    fallbackId: '', currentTrack: 'track', listenerApplied: { current: '' }, listenerTrack: { current: { key: '', count: 0, transport: -1, waiting: false } }, clockOffset: { current: 0 },
     localPause: { current: false }, isSpotify: false, audioPlayers: [{ current: player }],
     activeAudioRef: { current: 0 }, slotKeys: { current: ['track:0', ''] },
     HTMLMediaElement: { HAVE_METADATA: 1 }, listeningPosition,
@@ -159,6 +159,24 @@ test('unready audio waits to align; explicit guest resume can align again', () =
   context.localPause.current = false; snapshot.position = 75; sync(true);
   assert.equal(player.seeks, 2);
   assert.equal(player.plays, 2);
+});
+
+test('new songs start without repeated seeks until every fifth song', () => {
+  const { player, snapshot, context, sync } = listenerHarness();
+  sync();
+  for (let index = 2; index <= 5; index++) {
+    const id = String(index).repeat(32);
+    context.currentItem = { id };
+    context.currentKey = `track:${index}`;
+    context.slotKeys.current[0] = context.currentKey;
+    snapshot.item_id = id;
+    snapshot.transport_serial++;
+    snapshot.position = 15;
+    player.position = 0;
+    player.paused = true;
+    sync();
+    assert.equal(player.seeks, index < 5 ? 1 : 2);
+  }
 });
 
 

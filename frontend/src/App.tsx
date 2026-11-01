@@ -369,9 +369,11 @@ export default function App() {
   const [me, setMe] = useState<Profile | null>(null);
   const [telegramReady, setTelegramReady] = useState(!telegramInitData);
   const [memberCount, setMemberCount] = useState(0);
+  const [members, setMembers] = useState<{ member_id: string; owner_id: string; role: string }[]>([]);
   const [queueRevision, setQueueRevision] = useState(0);
   const [queueActionPending, setQueueActionPending] = useState(false);
   const [trackTitles, setTrackTitles] = useState<Record<string, string>>({});
+  const [youtubeDurations, setYoutubeDurations] = useState<Record<string, number>>({});
   const [playbackRevision, setPlaybackRevision] = useState(0);
   const [status, setStatus] = useState<'connecting' | 'authenticating' | 'connected' | 'closed'>('closed');
   const [error, setError] = useState('');
@@ -433,6 +435,7 @@ export default function App() {
   const localPause = useRef(listenPaused); localPause.current = listenPaused;
   const listenerError = useRef('');
   const listenerApplied = useRef('');
+  const listenerTrack = useRef({ key: '', count: 0, transport: -1, waiting: false });
   const [volume, setVolume] = useState(80);
   const volumeRef = useRef(0.8);
   const previousVolume = useRef(80);
@@ -476,7 +479,7 @@ export default function App() {
 
   function syncPlaybackTime(player: HTMLAudioElement) {
     setPlaybackTime(Number.isFinite(player.currentTime) ? player.currentTime : 0);
-    setPlaybackDuration(Number.isFinite(player.duration) ? player.duration : 0);
+    setPlaybackDuration(youtubeDurations[currentTrack || ''] || (Number.isFinite(player.duration) ? player.duration : 0));
   }
 
   useEffect(() => {
@@ -673,8 +676,8 @@ export default function App() {
     ws.onopen = () => {
       if (!active) return;
       setStatus('authenticating');
-      try { ws.send(JSON.stringify({ ...(session.role === 'Main' ? { host_token: session.host_token } :
-        { member_token: memberToken(session.lobby_id) }),
+      try { ws.send(JSON.stringify({ ...(session.role === 'Main' ? { host_token: session.host_token } : {}),
+        member_token: memberToken(session.lobby_id),
         ...(telegramInitData ? { telegram_init_data: telegramInitData } : {}) })); }
       catch { setError('Не удалось сохранить идентификатор гостя в браузере.'); ws.close(); }
     };
@@ -683,7 +686,11 @@ export default function App() {
       try {
         const message: unknown = JSON.parse(event.data);
         if (!message || typeof message !== 'object') throw new Error();
-        if ('type' in message && message.type === 'identity' &&
+        if ('type' in message && message.type === 'host_granted' && 'host_token' in message && typeof message.host_token === 'string') {
+          setSession({ lobby_id: session.lobby_id, role: 'Main', host_token: message.host_token });
+        } else if ('type' in message && message.type === 'host_revoked') {
+          setSession({ lobby_id: session.lobby_id, role: 'Member' });
+        } else if ('type' in message && message.type === 'identity' &&
             'owner_id' in message && typeof message.owner_id === 'string' &&
             /^[a-f0-9]{32}$/.test(message.owner_id)) {
           setOwnerId(message.owner_id);
@@ -723,7 +730,7 @@ export default function App() {
           if ('profiles' in message && message.profiles && typeof message.profiles === 'object')
             setProfiles(message.profiles as Record<string, Profile>);
           if ('main_profile' in message) setMainProfile(message.main_profile as Profile | null);
-          if ('members' in message && Array.isArray(message.members)) setMemberCount(message.members.length);
+          if ('members' in message && Array.isArray(message.members)) { setMemberCount(message.members.length); setMembers(message.members.filter((member: unknown) => member && typeof member === 'object' && 'member_id' in member && 'owner_id' in member && 'role' in member) as typeof members); }
           setQueueRevision(message.queue_revision);
           setQueueActionPending(false);
           if ('track_titles' in message && message.track_titles && typeof message.track_titles === 'object') {
@@ -745,7 +752,8 @@ export default function App() {
       setStatus('closed');
       setListenerToken('');
       setQueueActionPending(false);
-      setError(`Соединение закрыто (${event.code})${event.reason ? `: ${event.reason}` : ''}.`);
+      if (event.reason === 'invalid_host_token' && session.role === 'Main') { setSession({ lobby_id: session.lobby_id, role: 'Member' }); return; }
+      setError(event.reason === 'party_ended' ? 'Извините, вечеринка закончена.' : `Соединение закрыто (${event.code})${event.reason ? `: ${event.reason}` : ''}.`);
       if (event.code !== 1008 && retryCount.current < 8) {
         const delay = Math.min(1000 * 2 ** retryCount.current++, 10000);
         retryTimer = setTimeout(() => setAttempt((value) => value + 1), delay);
@@ -788,8 +796,9 @@ export default function App() {
     if (session?.role === 'Member') {
       if (!listenerToken) throw new Error('Включите «Слушать вместе».');
       const response = await fetch(`/api/listen/${session.lobby_id}/${item.id}/stream`, { signal, headers: { 'X-Listener-Token': listenerToken } });
-      const data: { url?: string; detail?: string } = await response.json();
+      const data: { url?: string; detail?: string; duration?: number } = await response.json();
       if (!response.ok || !data.url) throw new Error(data.detail || 'Не удалось подготовить музыку для слушателя.');
+      if (VIDEO_ID.test(item.track_id) && typeof data.duration === 'number' && data.duration > 0 && data.duration <= 86400) setYoutubeDurations((old) => ({ ...old, [item.track_id]: data.duration! }));
       if (!(data.url.startsWith('/api/music/') || data.url.startsWith('/api/youtube/audio/file/') || new URL(data.url).protocol === 'https:')) throw new Error('Некорректная аудиоссылка.');
       return data.url;
     }
@@ -803,8 +812,9 @@ export default function App() {
       headers: yandex || music ? { 'X-Host-Token': session.host_token } :
         { 'X-Lobby-Id': session.lobby_id, 'X-Host-Token': session.host_token },
     });
-    const data: { url?: string; detail?: string } = await response.json();
+    const data: { url?: string; detail?: string; duration?: number } = await response.json();
     if (!response.ok || !data.url) throw new Error(data.detail || `Аудиопоток недоступен (HTTP ${response.status}).`);
+    if (VIDEO_ID.test(item.track_id) && typeof data.duration === 'number' && data.duration > 0 && data.duration <= 86400) setYoutubeDurations((old) => ({ ...old, [item.track_id]: data.duration! }));
     if (music ? !(data.url.startsWith('/api/music/') || new URL(data.url).protocol === 'https:') : yandex ? new URL(data.url).protocol !== 'https:' :
         !/^\/api\/youtube\/audio\/file\/[A-Za-z0-9_-]+$/.test(data.url)) throw new Error('Некорректная аудиоссылка.');
     return data.url;
@@ -866,6 +876,20 @@ export default function App() {
       clearAudio(1 - promotion.slot);
       if (old) old.volume = volumeRef.current;
       slotKeys.current[1 - promotion.slot] = '';
+      return;
+    }
+    const buffered = preloaded.current;
+    if (session?.role === 'Member' && playbackDevice && buffered && buffered.id === currentItem?.id && slotKeys.current[buffered.slot] === currentKey) {
+      preloaded.current = null;
+      activeAudioRef.current = buffered.slot;
+      setActiveAudio(buffered.slot);
+      setAudioUrl(buffered.url);
+      setAudioError('');
+      setPlayingKey('');
+      clearAudio(1 - buffered.slot);
+      slotKeys.current[1 - buffered.slot] = '';
+      const player = audioPlayers[buffered.slot].current;
+      if (player) { player.volume = volumeRef.current; syncPlaybackTime(player); }
       return;
     }
     promoting.current = null;
@@ -1088,7 +1112,7 @@ export default function App() {
     }
     const player = audioPlayers[activeAudioRef.current].current;
     return player && slotKeys.current[activeAudioRef.current] === currentKey ?
-      { position: player.currentTime, duration: Number.isFinite(player.duration) ? player.duration : 0, paused: player.paused } :
+      { position: player.currentTime, duration: youtubeDurations[currentTrack || ''] || (Number.isFinite(player.duration) ? player.duration : 0), paused: player.paused } :
       { position: 0, duration: 0, paused: true };
   }
 
@@ -1114,26 +1138,30 @@ export default function App() {
     const target = listeningPosition(snapshot, Date.now() + clockOffset.current);
     const paused = snapshot.paused || localPause.current || snapshot.duration > 0 && target >= snapshot.duration - .05;
     const actual = localPlayback();
+    const previous = listenerTrack.current;
+    const newTrack = previous.key !== currentKey;
+    const count = newTrack ? previous.count + 1 : previous.count;
+    const align = force || count === 1 || (newTrack && count % 5 === 0) || (!newTrack && previous.transport !== (snapshot.transport_serial ?? snapshot.serial) && !(previous.waiting && !snapshot.paused));
     try {
       if (isSpotify) {
         const player = spotifyPlayer.current;
         if (!player || !spotifyReady) return;
         listenerApplied.current = command;
-        if (Math.abs(actual.position - target) > .5) player.seek(Math.floor(target));
+        if (align && Math.abs(actual.position - target) > .5) player.seek(Math.floor(target));
         if (paused) { if (!actual.paused) player.pause(); }
         else if (actual.paused) player.play();
       } else if (fallbackId === currentTrack) {
         const player = ytPlayer.current;
         if (!player || typeof player.getCurrentTime !== 'function') return;
         listenerApplied.current = command;
-        if (Math.abs(actual.position - target) > .5) player.seekTo(target, true);
+        if (align && Math.abs(actual.position - target) > .5) player.seekTo(target, true);
         if (paused) { if (!actual.paused) player.pauseVideo(); }
         else if (actual.paused) player.playVideo();
       } else {
         const player = audioPlayers[activeAudioRef.current].current;
         if (!player || player.readyState < HTMLMediaElement.HAVE_METADATA || slotKeys.current[activeAudioRef.current] !== currentKey) return;
         listenerApplied.current = command;
-        if (Math.abs(target - player.currentTime) > .5) player.currentTime = target;
+        if (align && Math.abs(target - player.currentTime) > .5) player.currentTime = target;
         player.playbackRate = 1;
         if (paused) { if (!player.paused) player.pause(); }
         else if (player.paused) void player.play().catch(() => {
@@ -1142,6 +1170,7 @@ export default function App() {
           }
         });
       }
+      listenerTrack.current = { key: currentKey, count, transport: snapshot.transport_serial ?? snapshot.serial, waiting: newTrack && count > 1 && snapshot.paused };
     } catch { if (force) setAudioError('Нажмите ▶ в плеере, чтобы разрешить воспроизведение.'); }
   }
 
@@ -1152,7 +1181,7 @@ export default function App() {
 
   function toggleListenTogether() {
     const enabled = !listenTogether;
-    listenWanted.current = enabled; localPause.current = false; listenerApplied.current = '';
+    listenWanted.current = enabled; localPause.current = false; listenerApplied.current = ''; listenerTrack.current = { key: '', count: 0, transport: -1, waiting: false };
     setListenPaused(false); setAudioError(''); listenerError.current = '';
     if (!enabled) {
       audioPlayers.forEach((ref) => ref.current?.pause());
@@ -1579,8 +1608,8 @@ export default function App() {
     const ready = preloaded.current;
     const next = ready && audioPlayers[ready.slot].current;
     if (!old || old.paused || !ready || ready.key !== currentKey || ready.id !== nextItem?.id || !next ||
-        next.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || !Number.isFinite(old.duration) ||
-        old.duration - old.currentTime > 3) return;
+        next.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || !Number.isFinite(youtubeDurations[currentTrack || ''] || old.duration) ||
+        (youtubeDurations[currentTrack || ''] || old.duration) - old.currentTime > 3) return;
     fading.current = true;
     old.volume = volumeRef.current;
     next.pause();
@@ -1649,6 +1678,7 @@ export default function App() {
             {mainProfile?.username && <small>{mainProfile.name}</small>}</div>
           <span className="hostbadge">MAIN</span>
         </section>
+        {session.role === 'Main' && members.some((member) => member.role !== 'Main') && <section className="card cardpad"><h3>Участники</h3>{members.filter((member) => member.role !== 'Main').map((member) => <div className="sectionhead" key={member.member_id}><span>{profiles[member.owner_id] ? profileLabel(profiles[member.owner_id]) : 'Гость'}</span><button className="button tiny" onClick={() => socket.current?.send(JSON.stringify({ action: 'transfer_host', member_id: member.member_id }))}>Назначить хостом</button></div>)}</section>}
         {session.role === 'Member' && <section className="card cardpad">
           <div className="sectionhead"><div><span className="eyebrow">СЛУШАТЬ ВМЕСТЕ</span><h3>{listenTogether ? 'Музыка на вашем устройстве' : 'Сейчас звук только у хоста'}</h3></div>
             <button className={`button ${listenTogether ? '' : 'primary'}`} disabled={status !== 'connected'} onClick={toggleListenTogether}>{listenTogether ? 'Выключить у себя' : 'Слушать вместе'}</button></div>
@@ -1722,7 +1752,7 @@ export default function App() {
             onPause={() => { if (slot === activeAudioRef.current && slotKeys.current[slot] === currentKey && !fading.current && !promoting.current) setPlayingKey(''); }}
             onLoadedMetadata={(event) => { if (slot === activeAudioRef.current && slotKeys.current[slot] === currentKey) { syncPlaybackTime(event.currentTarget); syncListener(); } }}
             onDurationChange={(event) => { if (slot === activeAudioRef.current && slotKeys.current[slot] === currentKey) syncPlaybackTime(event.currentTarget); }}
-            onTimeUpdate={(event) => { if (slot === activeAudioRef.current && slotKeys.current[slot] === currentKey) syncPlaybackTime(event.currentTarget); maybeCrossfade(slot); }}
+            onTimeUpdate={(event) => { if (slot === activeAudioRef.current && slotKeys.current[slot] === currentKey) { syncPlaybackTime(event.currentTarget); const duration = youtubeDurations[currentTrack || '']; if (session.role === 'Main' && duration && event.currentTarget.currentTime >= duration) { if (fading.current) finishFade(); else skipTrack(); } } maybeCrossfade(slot); }}
             onEnded={() => { if (slot === activeAudioRef.current && slotKeys.current[slot] === currentKey) {
               if (session.role !== 'Main') { setPlayingKey(''); return; }
               const next = preloaded.current && audioPlayers[preloaded.current.slot].current;
@@ -1776,6 +1806,7 @@ export default function App() {
               <span className="added-by"><Avatar profile={profiles[item.owner_id]} size={23} />
                 Добавил{item.owner_id === ownerId ? '(а) вы' : `(а) ${profileLabel(profiles[item.owner_id])}`}</span></div>
             {session.role === 'Main' && index > 0 && <span className="queueControls">
+              {index > 1 && <button className="button tiny" disabled={queueActionPending || status !== 'connected'} onClick={() => changeQueue('move_track', item.id, 1)}>Играть следующим</button>}
               <button className="button tiny" aria-label="Поднять трек" title="Поднять" disabled={index <= 1 || queueActionPending || status !== 'connected'} onClick={() => changeQueue('move_track', item.id, index - 1)}>↑</button>
               <button className="button tiny" aria-label="Опустить трек" title="Опустить" disabled={index >= queueItems.length - 1 || queueActionPending || status !== 'connected'} onClick={() => changeQueue('move_track', item.id, index + 1)}>↓</button>
             </span>}

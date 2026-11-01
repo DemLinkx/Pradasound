@@ -70,6 +70,7 @@ class YouTubeAudio:
 
 YOUTUBE_AUDIO_CACHE: dict[str, YouTubeAudio] = {}
 YOUTUBE_METADATA_CACHE: dict[str, tuple[str, str]] = {}
+YOUTUBE_DURATION_CACHE: dict[str, float] = {}
 YOUTUBE_AUDIO_TICKETS: dict[str, tuple[str, float]] = {}
 YOUTUBE_EXTRACT_LIMIT = asyncio.Semaphore(2)
 YOUTUBE_AUDIO_FAILURES: dict[str, tuple[float, str]] = {}
@@ -107,6 +108,11 @@ def extract_youtube_audio(video_id: str, proxy: str | None = None) -> tuple[str,
     expiry = float(parse_qs(parsed.query).get("expire", [0])[0])
     title = str(info.get("title") or video_id)[:150]
     artist = str(info.get("uploader") or info.get("channel") or "YouTube")[:100]
+    duration = info.get("duration")
+    if type(duration) in (int, float) and 0 < duration <= 86400:
+        if len(YOUTUBE_DURATION_CACHE) >= 512:
+            YOUTUBE_DURATION_CACHE.pop(next(iter(YOUTUBE_DURATION_CACHE)))
+        YOUTUBE_DURATION_CACHE[video_id] = float(duration)
     headers = {str(key): str(value) for key, value in (info.get("http_headers") or {}).items()
                if key.lower() in ("user-agent", "referer", "origin", "accept-language")}
     return url, min(expiry - 60, time.time() + 600), title, artist, headers
@@ -198,7 +204,7 @@ async def youtube_audio_url(video_id: str) -> YouTubeAudio:
 @app.post("/api/youtube/audio/{video_id}")
 async def prepare_youtube_audio(
     video_id: str, x_lobby_id: str = Header(""), x_host_token: str = Header("")
-) -> dict[str, str]:
+) -> dict[str, Any]:
     lobby = LOBBIES.get(x_lobby_id)
     if not lobby or not secrets.compare_digest(x_host_token, lobby.host_token):
         raise HTTPException(status_code=403, detail="Доступно только хосту комнаты")
@@ -213,7 +219,7 @@ async def prepare_youtube_audio(
         YOUTUBE_AUDIO_TICKETS.pop(next(iter(YOUTUBE_AUDIO_TICKETS)))
     ticket = secrets.token_urlsafe(24)
     YOUTUBE_AUDIO_TICKETS[ticket] = (video_id, now + 7200)
-    return {"url": f"/api/youtube/audio/file/{ticket}"}
+    return {"url": f"/api/youtube/audio/file/{ticket}", "duration": YOUTUBE_DURATION_CACHE.get(video_id)}
 
 
 @app.get("/api/youtube/audio/file/{ticket}")

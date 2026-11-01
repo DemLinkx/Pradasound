@@ -201,9 +201,13 @@ class Lobby:
     owner_ids: dict[str, str] = field(default_factory=dict)
     profiles: dict[str, dict[str, str | None]] = field(default_factory=dict)
     member_owners: dict[str, str] = field(default_factory=dict)
+    member_telegram: dict[str, int | None] = field(default_factory=dict)
     connections: dict[str, WebSocket] = field(default_factory=dict)
     last_empty: float = field(default_factory=monotonic)
+    ever_shared: bool = False
+    vacated: bool = False
     pending: int = 0
+    claim_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     broadcast_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     listener_tokens: dict[str, str] = field(default_factory=dict)
     playback: dict[str, object] | None = None
@@ -212,6 +216,20 @@ class Lobby:
 
 
 LOBBIES: dict[str, Lobby] = {}
+
+
+async def expire_empty(lobby_id: str, lobby: Lobby, stamp: float) -> None:
+    await asyncio.sleep(900 if lobby.ever_shared else 30)
+    while LOBBIES.get(lobby_id) is lobby and not lobby.connections and lobby.last_empty == stamp:
+        if not lobby.pending:
+            LOBBIES.pop(lobby_id, None)
+            return
+        await asyncio.sleep(1)
+
+
+def is_expired(lobby: Lobby) -> bool:
+    return (not lobby.connections and
+            monotonic() - lobby.last_empty >= (900 if lobby.ever_shared else 30))
 
 
 def playback_snapshot(lobby: Lobby) -> dict[str, object] | None:
@@ -240,6 +258,7 @@ class ConnectionManager:
             previous_id = lobby.main_id
             previous = lobby.connections.pop(previous_id, None)
             lobby.member_owners.pop(previous_id, None)
+            lobby.member_telegram.pop(previous_id, None)
             lobby.main_id = None
             if previous is not None:
                 try:
@@ -252,6 +271,9 @@ class ConnectionManager:
         member_id = uuid4().hex
         lobby.connections[member_id] = ws
         lobby.member_owners[member_id] = owner_id
+        if len(set(lobby.member_owners.values())) >= 2:
+            lobby.ever_shared = True
+        lobby.vacated = False
         if main:
             lobby.main_id = member_id
         await self.send(ws, {"type": "identity", "owner_id": owner_id})
@@ -262,6 +284,7 @@ class ConnectionManager:
         lobby = LOBBIES[lobby_id]
         lobby.connections.pop(member_id, None)
         lobby.member_owners.pop(member_id, None)
+        lobby.member_telegram.pop(member_id, None)
         for token, member in list(lobby.listener_tokens.items()):
             if member == member_id:
                 del lobby.listener_tokens[token]
@@ -286,6 +309,8 @@ class ConnectionManager:
                 lobby.profiles.pop(owner_id, None)
         if not lobby.connections:
             lobby.last_empty = monotonic()
+            lobby.vacated = True
+            asyncio.create_task(expire_empty(lobby_id, lobby, lobby.last_empty))
 
     async def send(self, ws: WebSocket, message: dict[str, object]) -> bool:
         try:
@@ -377,7 +402,7 @@ async def create_lobby(body: TelegramAuth | None = None) -> dict[str, str]:
         except ValueError as exc:
             raise HTTPException(status_code=401, detail=str(exc)) from exc
     for expired_id, lobby in list(LOBBIES.items()):
-        if not lobby.connections and not lobby.pending and monotonic() - lobby.last_empty > 1800:
+        if not lobby.pending and is_expired(lobby):
             del LOBBIES[expired_id]
     if len(LOBBIES) >= 100:
         raise HTTPException(status_code=503, detail="lobby_limit_reached")
@@ -389,18 +414,20 @@ async def create_lobby(body: TelegramAuth | None = None) -> dict[str, str]:
         lobby.owner_ids[host_token] = owner_id
         lobby.profiles[owner_id] = user.public()
     LOBBIES[lobby_id] = lobby
+    asyncio.create_task(expire_empty(lobby_id, lobby, lobby.last_empty))
     return {"lobby_id": lobby_id, "host_token": host_token, "role": "Main"}
 
 
 @router.websocket("/{lobby_id}/ws")
 async def lobby_ws(ws: WebSocket, lobby_id: str) -> None:
     lobby = LOBBIES.get(lobby_id)
-    if lobby is None:
-        await ws.close(code=1008, reason="lobby_not_found")
-        return
     origin = ws.headers.get("origin")
     if origin is not None and origin not in origins:
         await ws.close(code=1008, reason="origin_not_allowed")
+        return
+    if lobby is None or is_expired(lobby):
+        await ws.accept()
+        await ws.close(code=1008, reason="party_ended")
         return
     lobby.pending += 1
     try:
@@ -453,8 +480,29 @@ async def lobby_ws(ws: WebSocket, lobby_id: str) -> None:
         lobby.profiles.setdefault(owner_id, {"name": "Хост", "username": None, "photo_url": None})
     else:
         lobby.profiles.setdefault(owner_id, {"name": "Гость", "username": None, "photo_url": None})
-    member_id = await manager.connect(lobby_id, ws, main=host_token is not None,
-                                      owner_id=owner_id)
+    async with lobby.claim_lock:
+        if LOBBIES.get(lobby_id) is not lobby or is_expired(lobby):
+            await ws.close(code=1008, reason="party_ended")
+            return
+        if host_token is not None and not secrets.compare_digest(host_token, lobby.host_token):
+            await ws.close(code=1008, reason="invalid_host_token")
+            return
+        promote = (host_token is None and lobby.vacated and lobby.ever_shared
+                   and not lobby.connections)
+        if promote:
+            lobby.owner_ids.pop(lobby.host_token, None)
+            lobby.host_token = secrets.token_urlsafe(32)
+            lobby.owner_ids[lobby.host_token] = owner_id
+            lobby.host_telegram_id = telegram_user.id if telegram_user else None
+        if (host_token is not None and isinstance(member_token, str)
+                and re.fullmatch(r"[a-f0-9]{64}", member_token)):
+            lobby.owner_ids[member_token] = owner_id
+        member_id = await manager.connect(lobby_id, ws, main=host_token is not None or promote,
+                                          owner_id=owner_id)
+        if member_id is not None:
+            lobby.member_telegram[member_id] = telegram_user.id if telegram_user else None
+        if promote and member_id is not None:
+            await manager.send(ws, {"type": "host_granted", "host_token": lobby.host_token})
     if member_id is None:
         return
     try:
@@ -476,7 +524,30 @@ async def lobby_ws(ws: WebSocket, lobby_id: str) -> None:
             if not isinstance(message, dict):
                 await manager.send(ws, {"type": "error", "error": "invalid_message"})
                 continue
-            if message.get("action") == "listen_together":
+            if message.get("action") == "transfer_host":
+                target_id = message.get("member_id")
+                target = lobby.connections.get(target_id) if isinstance(target_id, str) else None
+                if member_id != lobby.main_id or not target or target_id == member_id:
+                    await manager.send(ws, {"type": "error", "error": "invalid_host_transfer"})
+                    continue
+                old_token, old_telegram = lobby.host_token, lobby.host_telegram_id
+                target_owner = lobby.member_owners[target_id]
+                new_token = secrets.token_urlsafe(32)
+                lobby.host_token = new_token
+                lobby.host_telegram_id = lobby.member_telegram.get(target_id)
+                lobby.owner_ids[new_token] = target_owner
+                lobby.main_id = target_id
+                if not await manager.send(target, {"type": "host_granted", "host_token": new_token}):
+                    lobby.host_token, lobby.host_telegram_id = old_token, old_telegram
+                    lobby.main_id = member_id
+                    lobby.owner_ids.pop(new_token, None)
+                    await manager.send(ws, {"type": "error", "error": "host_transfer_failed"})
+                    continue
+                lobby.owner_ids.pop(old_token, None)
+                await manager.send(ws, {"type": "host_revoked"})
+                await manager.broadcast(lobby_id)
+                continue
+            elif message.get("action") == "listen_together":
                 enabled = message.get("enabled")
                 if type(enabled) is not bool or member_id == lobby.main_id:
                     await manager.send(ws, {"type": "error", "error": "invalid_listen_mode"})
