@@ -182,7 +182,7 @@ def test_heartbeats_keep_transport_command_but_seek_and_pause_change_it(monkeypa
 
     from app.api import lobby
 
-    ticks = count(100, .1)
+    ticks = count(lobby.monotonic(), .1)
     monkeypatch.setattr(lobby, "monotonic", lambda: next(ticks))
     with party() as (_, _, host, guest, state):
         guest.send_json({"action": "listen_together", "enabled": True})
