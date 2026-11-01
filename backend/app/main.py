@@ -466,10 +466,15 @@ class YandexTracksResponse(BaseModel):
 
 
 def liked_page(client: Any, offset: int) -> YandexTracksResponse:
-    likes = client.users_likes_tracks(timeout=10)
-    liked = likes.tracks if likes and likes.tracks else []
+    cached = getattr(client, "_prada_liked_ids", None)
+    if offset and cached and cached[0] > monotonic():
+        liked = cached[1]
+    else:
+        likes = client.users_likes_tracks(timeout=10)
+        liked = [track.track_id for track in likes.tracks] if likes and likes.tracks else []
+        client._prada_liked_ids = (monotonic() + 120, liked)
     selected = liked[offset : offset + 50]
-    tracks = client.tracks([track.track_id for track in selected], timeout=10) if selected else []
+    tracks = client.tracks(selected, timeout=10) if selected else []
     normalized = []
     missing = 0
     for track in tracks or []:
@@ -531,7 +536,7 @@ def yandex_tracks(body: YandexToken) -> YandexTracksResponse:
 def more_yandex_tracks(
     offset: int = 0, x_yandex_session: str = Header(default="")
 ) -> YandexTracksResponse:
-    if offset < 0 or offset > 10000:
+    if offset < 0 or offset > 100000:
         raise HTTPException(status_code=400, detail="Некорректная страница")
     client = yandex_session(x_yandex_session)
     try:

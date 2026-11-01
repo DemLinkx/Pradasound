@@ -728,7 +728,7 @@ async def lobby_ws(ws: WebSocket, lobby_id: str) -> None:
                     await manager.send(ws, {"type": "error", "error": "track_not_queued"})
                     continue
                 if message["action"] == "remove_track":
-                    if lobby.queue_items[index].owner_id != owner_id:
+                    if member_id != lobby.main_id and lobby.queue_items[index].owner_id != owner_id:
                         await manager.send(ws, {"type": "error", "error": "not_track_owner"})
                         continue
                     removed = lobby.queue_items.pop(index)

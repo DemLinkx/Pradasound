@@ -33,7 +33,7 @@ settings = Settings()
 SESSION_TTL = 14 * 3600
 LOGIN_TTL = 600
 MAX_SESSIONS = 512
-MAX_TRACKS = 500
+MAX_LIBRARY_TRACKS = 100000
 PAGE_SIZE = 50
 MAX_DEVICE_LOGINS = 100
 SPOTIFY_DEVICE_ID = "65b708073fc0480ea92a077233ca87bd"
@@ -548,7 +548,7 @@ async def _spotify_native_page(session: MusicSession, handle: str, cursor: str) 
         offset = int(cursor or "0")
     except ValueError:
         raise HTTPException(400, "Некорректная страница") from None
-    if offset < 0 or offset >= MAX_TRACKS or str(offset) != (cursor or "0"):
+    if offset < 0 or offset >= MAX_LIBRARY_TRACKS or str(offset) != (cursor or "0"):
         raise HTTPException(400, "Некорректная страница")
     if cursor and cursor not in session.page_urls:
         raise HTTPException(400, "Страница ещё не загружена")
@@ -665,7 +665,7 @@ async def _spotify_native_page(session: MusicSession, handle: str, cursor: str) 
         if raw_tracks and not normalized:
             raise HTTPException(502, "Spotify вернул некорректный список треков")
         next_offset = offset + PAGE_SIZE
-        more = bool(next_token) and next_offset < MAX_TRACKS
+        more = bool(next_token) and next_offset < MAX_LIBRARY_TRACKS
         if more:
             session.page_urls[str(next_offset)] = next_token
         account = body.get("account")
@@ -1356,7 +1356,7 @@ async def tracks(
         offset = int(cursor or "0")
     except ValueError:
         raise HTTPException(400, "Некорректная страница") from None
-    if offset < 0 or offset >= MAX_TRACKS or str(offset) != (cursor or "0"):
+    if offset < 0 or offset >= MAX_LIBRARY_TRACKS or str(offset) != (cursor or "0"):
         raise HTTPException(400, "Некорректная страница")
     if provider == "spotify":
         async with session.lock:
@@ -1439,8 +1439,8 @@ async def tracks(
         "session": x_music_session,
         "authenticated": True,
         "tracks": normalized,
-        "next_cursor": str(next_offset) if more and next_offset < MAX_TRACKS else None,
-        "has_more": bool(more and next_offset < MAX_TRACKS),
+        "next_cursor": str(next_offset) if more and next_offset < MAX_LIBRARY_TRACKS else None,
+        "has_more": bool(more and next_offset < MAX_LIBRARY_TRACKS),
     }
 
 
@@ -1502,7 +1502,7 @@ async def public_import(provider: str, body: PublicBody, request: Request) -> di
         offset = int(body.cursor or "0")
     except ValueError:
         raise HTTPException(400, "Некорректная страница") from None
-    if offset < 0 or offset >= MAX_TRACKS or str(offset) != (body.cursor or "0"):
+    if offset < 0 or offset >= MAX_LIBRARY_TRACKS or str(offset) != (body.cursor or "0"):
         raise HTTPException(400, "Некорректная страница")
     session = _session(body.session, "soundcloud") if body.session else None
     if session is not None and session.access_token:
@@ -1541,7 +1541,7 @@ async def public_import(provider: str, body: PublicBody, request: Request) -> di
         session.imported[identifier] = item
         imported.append(item)
     next_offset = offset + PAGE_SIZE
-    more = len(raw_entries) >= PAGE_SIZE and next_offset < MAX_TRACKS
+    more = len(raw_entries) >= PAGE_SIZE and next_offset < MAX_LIBRARY_TRACKS
     return {
         "session": handle,
         "authenticated": False,

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { CSSProperties, FormEvent } from 'react';
+import type { CSSProperties, FormEvent, HTMLAttributes, PointerEvent as ReactPointerEvent, ReactNode } from 'react';
 import type Hls from 'hls.js';
 import brandLogo from './assets/prada-sound-logo.png';
 import party1 from './assets/party-1.jpg';
@@ -7,6 +7,42 @@ import party2 from './assets/party-2.jpg';
 import party3 from './assets/party-3.jpg';
 
 type Session = { lobby_id: string; role: 'Main' | 'Member'; host_token?: string };
+type LibrarySource = 'yandex' | 'spotify' | 'soundcloud' | 'youtube' | 'vk';
+
+function SwipeTrack({ children, onRight, onLeft, rightLabel = 'В очередь', leftLabel = 'Удалить', ...props }:
+  HTMLAttributes<HTMLLIElement> & { children: ReactNode; onRight?: () => void; onLeft?: () => void; rightLabel?: string; leftLabel?: string }) {
+  const gesture = useRef<{ x: number; y: number; locked: boolean; dx: number } | null>(null);
+  const [offset, setOffset] = useState(0);
+  const end = (event: ReactPointerEvent<HTMLLIElement>, cancel = false) => {
+    const drag = gesture.current; gesture.current = null; setOffset(0);
+    if (!drag?.locked) return;
+    event.stopPropagation();
+    if (!cancel && Math.abs(drag.dx) >= 72) { if (drag.dx > 0) onRight?.(); else onLeft?.(); }
+  };
+  return <li {...props} className={`swipe-row ${props.className || ''} ${offset ? 'swiping' : ''}`}
+    tabIndex={onRight || onLeft ? 0 : undefined}
+    onKeyDown={(event) => { if (event.key === 'ArrowRight' && onRight) { event.preventDefault(); onRight(); } else if ((event.key === 'Delete' || event.key === 'ArrowLeft') && onLeft) { event.preventDefault(); onLeft(); } }}
+    style={{ ...props.style, '--swipe-x': `${offset}px` } as CSSProperties}
+    onPointerDown={(event) => {
+      if (event.button !== 0 || !matchMedia('(max-width:850px)').matches || (event.target as HTMLElement).closest('button,a,input')) return;
+      gesture.current = { x: event.clientX, y: event.clientY, locked: false, dx: 0 };
+    }}
+    onPointerMove={(event) => {
+      const drag = gesture.current; if (!drag) return;
+      const dx = event.clientX - drag.x, dy = event.clientY - drag.y;
+      if (!drag.locked && Math.abs(dy) > 10 && Math.abs(dy) >= Math.abs(dx)) { gesture.current = null; return; }
+      if (!drag.locked && Math.abs(dx) > 10 && Math.abs(dx) > Math.abs(dy) * 1.25) {
+        drag.locked = true; event.currentTarget.setPointerCapture(event.pointerId);
+      }
+      if (!drag.locked) return;
+      event.stopPropagation();
+      drag.dx = dx > 0 && onRight || dx < 0 && onLeft ? Math.max(-120, Math.min(120, dx)) : 0;
+      setOffset(drag.dx);
+    }} onPointerUp={(event) => end(event)} onPointerCancel={(event) => end(event, true)}>
+    <span className={`swipe-reveal ${offset < 0 ? 'delete' : ''}`} aria-hidden="true">{offset < 0 ? `${leftLabel} ←` : `→ ${rightLabel}`}</span>
+    <div className="swipe-content">{children}</div>
+  </li>;
+}
 type YandexTrack = { id: string; title: string; artist: string; playable: boolean; reason: string };
 function yandexPage(value: unknown) {
   if (!value || typeof value !== 'object' || !('tracks' in value) || !Array.isArray(value.tracks))
@@ -337,9 +373,26 @@ const STYLES = `
   @media(max-width:550px){.shell{width:min(100% - 24px,680px);padding-top:16px}.topbar{margin-bottom:18px}.landing{padding-top:12px}.copy-toast{right:16px}.deck{padding:20px}.deck-stage{grid-template-columns:1fr;min-height:0;gap:16px;padding-bottom:20px}.deck-stage-copy{min-height:145px}.deck-stage-copy h2{font-size:clamp(27px,8vw,38px)}.miniPlayer{min-height:0;aspect-ratio:16/9}.share-card{padding:20px}.share-card .share{grid-template-columns:minmax(0,1fr) 96px}.share-card .qr{width:96px;height:96px}.likes{max-height:400px}.brand{font-size:20px}}
   @media(max-width:550px){.brandmark{width:44px;height:44px}.topbar>.pill{display:none}}
   @media(prefers-reduced-motion:reduce){.backdrop-art,.backdrop:after,.bars i,.spectrum i,.landing-copy,.headline-accent,.copy-toast{animation:none}.button,.headline-word{transition:none}.headline-word:hover,.headline-word:active{transform:none}}
+  [hidden]{display:none!important}.mobile-only{display:none}.drawer{min-width:0}.drawer-header{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:4px 0 18px}.queue-card>.sectionhead{display:none}.drawer-header h2{font-size:26px;letter-spacing:-.045em;margin:7px 0 0}.drawer-body{min-width:0}.drawer-body>.card{margin-bottom:16px}.library-tabs{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;padding:5px;background:#0b0d116e;border:1px solid #ffffff12;border-radius:17px;margin-bottom:16px}.library-tabs button{border:0;border-radius:12px;padding:11px 2px;color:#aeb4c0;background:transparent;display:grid;justify-items:center;gap:7px;font-size:10px;font-weight:650;transition:background .2s,color .2s}.library-tabs button.active{color:#ffab68;background:#ed8d3820;box-shadow:inset 0 0 0 1px #f4a45c40}.service-icon{font-size:20px;font-weight:800;line-height:24px;height:24px}.service-icon.spotify{font-size:26px}.service-icon.soundcloud{font-size:25px}.service-icon.youtube{font-size:17px}.library-vk{display:block;background:none;border:0;padding:16px 0;font-size:11px;color:#a6abb6}.library-progress{display:flex;gap:9px;align-items:center;font-size:12px;line-height:1.5;color:#efb982}.library-progress>span{width:7px;height:7px;flex:none;border-radius:50%;background:#ef9b54;animation:search-pulse 1s ease-in-out infinite alternate}@keyframes search-pulse{to{opacity:.3}}.source-dot{display:grid;place-items:center;width:32px;height:32px;background:#ffffff08;border:1px solid #ffffff14;border-radius:9px;font-size:10px;color:#aeb5be}
+  .queue li.swipe-row,.likes li.swipe-row{display:block;position:relative;overflow:hidden;padding:0;touch-action:pan-y;isolation:isolate}.swipe-content{position:relative;z-index:1;display:flex;align-items:center;gap:12px;min-width:0;padding:13px 12px;transform:translateX(var(--swipe-x,0px));transition:transform .25s cubic-bezier(.2,.8,.2,1);background:#24262bef}.swiping .swipe-content{transition:none}.swipe-row:focus-visible{outline:2px solid #f3a66b;outline-offset:2px}.drawer-header,.edge-handle,.swipe-content{user-select:none}.library-end{height:1px}.swipe-reveal{position:absolute;inset:0;display:flex;align-items:center;padding:0 14px;color:#1a140d;background:#eaa064;font-size:12px;font-weight:750;opacity:0;transition:opacity .12s}.swiping .swipe-reveal{opacity:1}.swipe-reveal.delete{justify-content:flex-end;background:#ad4943;color:#fff}.queue .swipe-content{display:grid;grid-template-columns:20px minmax(0,1fr) 44px;gap:8px 11px}.queue .trackmeta{width:100%;min-width:0;overflow:hidden;overflow-wrap:normal}.queue .trackmeta strong{font-size:14px;line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;word-break:normal}.queue .trackmeta small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;line-height:1.4}.queue .added-by{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;width:44px;margin:0;min-width:0;font-size:10px;font-weight:500;color:#b1b6bf}.queue .added-by>span{display:block;width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:center}.queueControls{grid-column:2;grid-row:2;flex-wrap:wrap}.queue .track-action{grid-column:3;grid-row:2;justify-self:end}.queueControls .button{padding:5px 7px;font-size:10px}.queue .button.track-action{padding:5px 7px;font-size:10px}.queue .index{width:auto}.likes .trackmeta{overflow:hidden;overflow-wrap:normal}.likes .trackmeta strong{font-size:14px;line-height:1.4}.likes .trackmeta small{font-size:12px;line-height:1.4}.library-drawer .likes{max-height:540px}.library-drawer .cardpad{padding:20px}.library-drawer h3{font-size:21px;margin-top:6px}.library-drawer .field{margin-top:16px}.swipe-hint{font-size:11px;line-height:1.6;color:#a3a9b5;margin:0 0 14px}.account-connect{margin:10px 0 16px}.account-connect summary{font-size:12px;color:#b4bac4;cursor:pointer}.account-connect[open] summary{margin-bottom:12px}.library-drawer .library-search{position:sticky;top:-1px;z-index:5;background:#191c22f5;padding:12px 0;margin:0 0 10px;backdrop-filter:blur(16px)}
+  @media(max-width:850px){
+    .mobile-only{display:block}.drawer-scrim{display:block;position:fixed;inset:0;z-index:70;padding:0;border:0;background:#03050b9c;backdrop-filter:blur(7px);opacity:0;pointer-events:none;transition:opacity .3s}.drawer-scrim.visible{opacity:1;pointer-events:auto}.drawer{position:fixed;top:0;bottom:0;width:calc(100% - 24px);max-width:510px;z-index:80;background:linear-gradient(155deg,#1b1f28fa,#101218fc);border:1px solid #ffffff18;box-shadow:0 0 80px #000b;display:flex;flex-direction:column;gap:0;visibility:hidden;transition:transform .34s cubic-bezier(.2,.8,.2,1),visibility .34s;will-change:transform;padding-top:env(safe-area-inset-top,0px)}.queue-drawer{left:0;border-radius:0 26px 26px 0;transform:translateX(calc(-100% - 20px))}.library-drawer{right:0;border-radius:26px 0 0 26px;transform:translateX(calc(100% + 20px))}.drawer.is-open{transform:translateX(0);visibility:visible}.drawer-header{padding:26px 20px 18px;flex-shrink:0;touch-action:pan-y}.drawer-header h2{font-size:29px;line-height:1.12;letter-spacing:-.055em}.drawer-header .eyebrow{font-size:9px}.drawer-close{width:34px;height:34px;flex:none;display:grid;place-items:center;border:1px solid #ffffff1a;background:#ffffff07;border-radius:50%;font-size:23px;font-weight:300;line-height:1;color:#d5dae3}.drawer>.library-progress,.drawer>.notice{margin:0 20px 12px}.drawer>.swipe-hint{padding:0 20px;margin:0 0 16px}.drawer-body{overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;padding:0 16px calc(24px + env(safe-area-inset-bottom,0px));flex:1;min-height:0}.drawer-body>.card{border:0;border-radius:0;background:none;box-shadow:none;backdrop-filter:none;padding:0}.library-tabs{margin:0 16px 12px;flex-shrink:0;border-radius:16px;gap:4px}.library-tabs button{padding:12px 2px;font-size:10px}.library-drawer .sectionhead,.queue-card>.sectionhead{display:none}.library-drawer .likes{max-height:none;overflow:visible;margin-top:10px;gap:8px}.library-drawer .likes .swipe-content{padding:16px 14px}.library-drawer .likes .trackmeta strong{font-size:15px;font-weight:750}.library-drawer .likes .trackmeta small{font-size:12px}.drawer .queueControls,.drawer .track-action,.drawer .load-more,.stage-add{display:none!important}.queue .swipe-content{padding:16px 11px;grid-template-columns:18px minmax(0,1fr) 40px;gap:10px}.queue .added-by{width:40px}.queue .trackmeta strong{font-size:15px}.queue .trackmeta small{font-size:12px}.queue .index{font-size:11px}.edge-handle{position:fixed;top:48%;z-index:65;width:23px;height:132px;border:1px solid #f1a46c47;background:linear-gradient(180deg,#292a32ee,#151822f5);backdrop-filter:blur(15px);box-shadow:0 5px 25px #0006;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:9px;padding:9px 0;color:#f2ae78;touch-action:pan-y}.edge-handle span{writing-mode:vertical-rl;font-size:10px;font-weight:650;letter-spacing:.08em}.edge-handle i{font-style:normal;font-size:10px}.edge-left{left:0;border-radius:0 12px 12px 0;border-left:0}.edge-right{right:0;border-radius:12px 0 0 12px;border-right:0}.edge-left span{transform:rotate(180deg)}.sidecol{gap:0}.roomhead .actions{gap:8px}.roomhead .actions .button{font-size:12px;padding:9px 12px}.roomhead{margin-bottom:18px}.share-card{margin-top:2px}.hostcard{padding:17px!important}.hostcard .eyebrow{font-size:9px}.shell{padding-bottom:30px}.library-vk{font-size:10px}.drawer .authbox{padding:14px}.drawer .code{font-size:25px}.drawer .button.primary{font-size:14px;padding:13px 16px}.drawer .music-import{gap:14px}.drawer .music-consent{font-size:12px}.drawer .field{font-size:12px}.drawer .library-search input{padding:14px 13px}.drawer .library-search{font-size:11px;color:#a8b0be}.drawer .notice{font-size:12px}.drawer .small{font-size:12px;line-height:1.5}.drawer .added-by .avatar{flex:none}.queue .swipe-row.current .swipe-content{background:#44332af2}
+  }
+  @media(prefers-reduced-motion:reduce){.drawer,.drawer-scrim,.swipe-content,.library-progress>span{transition:none;animation:none}}
+
 `;
 
 export default function App() {
+  const [isMobile, setIsMobile] = useState(() => matchMedia('(max-width:850px)').matches);
+  const [drawer, setDrawer] = useState<'queue' | 'library' | null>(null);
+  const [librarySource, setLibrarySource] = useState<LibrarySource>('yandex');
+  const [libraryLimit, setLibraryLimit] = useState(50);
+  const [libraryScanning, setLibraryScanning] = useState(false);
+  const [libraryScanError, setLibraryScanError] = useState('');
+  const [librarySearchAttempt, setLibrarySearchAttempt] = useState(0);
+  const libraryEnd = useRef<HTMLDivElement>(null);
+  const [youtubeCandidate, setYoutubeCandidate] = useState<{ id: string; title: string; artist: string } | null>(null);
+  const panelGesture = useRef<{ x: number; y: number; from: 'queue' | 'library'; close: boolean } | null>(null);
   const [partyImage] = useState(() => [party1, party2, party3][Math.floor(Math.random() * 3)]);
   const [session, setSession] = useState<Session | null>(() => {
     const params = new URLSearchParams(location.search);
@@ -406,6 +459,8 @@ export default function App() {
   const [musicSearch, setMusicSearch] = useState('');
   const [musicError, setMusicError] = useState('');
   const [musicBusy, setMusicBusy] = useState(false);
+  const libraryData = useRef({ hasMoreLikes, nextLikesOffset, musicLibraries });
+  libraryData.current = { hasMoreLikes, nextLikesOffset, musicLibraries };
   const [musicRetryUntil, setMusicRetryUntil] = useState<Partial<Record<MusicProvider, number>>>({});
   const [musicClock, setMusicClock] = useState(Date.now());
   const [musicDeviceLogin, setMusicDeviceLogin] = useState<MusicDeviceLogin | null>(null);
@@ -1418,7 +1473,8 @@ export default function App() {
     try { ws.send(JSON.stringify({ action: 'add_track', track_id: id,
       ...(title ? { title: title.slice(0, 200) } : {}),
       ...(providerSession ? { provider_session: providerSession } : {}),
-      ...(id.startsWith('yandex_') ? { yandex_session: yandexSession } : {}) })); return true; }
+      ...(id.startsWith('yandex_') ? { yandex_session: yandexSession } : {}) }));
+      setCopyNotice({ message: 'Трек добавлен в очередь', id: ++copyNoticeId.current }); return true; }
     catch { setError('Не удалось отправить трек. Подключитесь снова.'); return false; }
   }
 
@@ -1633,6 +1689,122 @@ export default function App() {
   const statusLabel = { connecting: 'Подключение…', authenticating: 'Вход…', connected: 'Подключено', closed: 'Отключено' }[status];
   const inviteUrl = session ? `${location.origin}${location.pathname}?lobby=${session.lobby_id}` : '';
   const qr = useMemo(() => inviteUrl ? qrPath(inviteUrl) : '', [inviteUrl]);
+  function selectLibrary(source: LibrarySource) {
+    setLibrarySource(source); setLibraryLimit(50); setLibraryScanError('');
+    if (source !== 'yandex' && source !== 'youtube') { setMusicProvider(source); setMusicSearch(''); setMusicUrl(''); setMusicError(''); }
+  }
+
+  function queueCaption(item: QueueItem) {
+    const label = trackTitles[item.track_id] || item.track_id;
+    const split = label.lastIndexOf(' — ');
+    return split > 0 ? { title: label.slice(0, split), artist: label.slice(split + 3) } : { title: label, artist: sourceName(item.track_id) };
+  }
+
+  function startPanelSwipe(event: ReactPointerEvent<HTMLElement>) {
+    if (!isMobile || !session) return;
+    const target = event.target as HTMLElement;
+    if (target.closest('.swipe-row,input,textarea,select')) return;
+    if (drawer && target.closest('.drawer-header')) panelGesture.current = { x: event.clientX, y: event.clientY, from: drawer, close: true };
+    else if (!drawer && (target.closest('.edge-left') || event.clientX < 30)) panelGesture.current = { x: event.clientX, y: event.clientY, from: 'queue', close: false };
+    else if (!drawer && (target.closest('.edge-right') || event.clientX > innerWidth - 30)) panelGesture.current = { x: event.clientX, y: event.clientY, from: 'library', close: false };
+    else return;
+  }
+
+  function finishPanelSwipe(event: ReactPointerEvent<HTMLElement>) {
+    const gesture = panelGesture.current; panelGesture.current = null;
+    if (!gesture) return;
+    const dx = event.clientX - gesture.x, dy = event.clientY - gesture.y;
+    if (Math.abs(dx) < 45 || Math.abs(dx) < Math.abs(dy) * 1.25) return;
+    const opens = gesture.from === 'queue' ? dx > 0 : dx < 0;
+    if (gesture.close ? !opens : opens) setDrawer(gesture.close ? null : gesture.from);
+  }
+
+  useEffect(() => {
+    const media = matchMedia('(max-width:850px)');
+    const update = () => { setIsMobile(media.matches); setDrawer(null); };
+    media.addEventListener('change', update);
+    return () => media.removeEventListener('change', update);
+  }, []);
+
+  useEffect(() => {
+    if (!isMobile || !drawer || !session) return;
+    const overflow = document.body.style.overflow;
+    const previousFocus = document.activeElement as HTMLElement | null;
+    document.body.style.overflow = 'hidden';
+    document.querySelector<HTMLButtonElement>(`.${drawer}-drawer .drawer-close`)?.focus({ preventScroll: true });
+    const keyboard = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setDrawer(null);
+      if (event.key !== 'Tab') return;
+      const focusable = Array.from(document.querySelectorAll<HTMLElement>(`.${drawer}-drawer button:not(:disabled), .${drawer}-drawer input, .${drawer}-drawer a[href]`)).filter((element) => element.getClientRects().length);
+      const first = focusable[0], last = focusable.at(-1);
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+    };
+    document.addEventListener('keydown', keyboard);
+    return () => { document.body.style.overflow = overflow; document.removeEventListener('keydown', keyboard); previousFocus?.focus({ preventScroll: true }); };
+  }, [isMobile, drawer, session?.lobby_id]);
+
+  useEffect(() => {
+    if (librarySource !== 'youtube') return;
+    setYoutubeCandidate(null);
+    const id = youtubeId(trackId); if (!id) return;
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      setLoadingMetadata(true);
+      void fetch(`/api/youtube/metadata/${id}`, { signal: controller.signal }).then(async (response) => {
+        const data = await response.json();
+        if (!response.ok || typeof data.title !== 'string' || typeof data.artist !== 'string') throw new Error('Не удалось получить название YouTube. Проверьте ссылку.');
+        if (!controller.signal.aborted) setYoutubeCandidate({ id, title: data.title, artist: data.artist });
+      }).catch((cause) => { if (!controller.signal.aborted) setLibraryScanError(cause instanceof Error ? cause.message : 'Не удалось загрузить YouTube.'); })
+        .finally(() => { if (!controller.signal.aborted) setLoadingMetadata(false); });
+    }, 400);
+    return () => { clearTimeout(timer); controller.abort(); setLoadingMetadata(false); };
+  }, [trackId, librarySource]);
+
+  const libraryQuery = librarySource === 'yandex' ? yandexSearch.trim() : musicSearch.trim();
+  const selectedLibrary = musicLibraries[musicProvider];
+  useEffect(() => { setLibraryLimit(50); }, [libraryQuery]);
+  useEffect(() => {
+    setLibraryScanError(''); setLibraryScanning(false);
+    if (librarySource === 'youtube' || isMobile && drawer !== 'library' || loadingLikes || musicBusy) return;
+    if (librarySource === 'yandex' ? !yandexSession || !hasMoreLikes : !selectedLibrary?.has_more) return;
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      void (async () => {
+        setLibraryScanning(true);
+        try {
+          if (librarySource === 'yandex' && yandexSession) {
+            let more = libraryData.current.hasMoreLikes, offset = libraryData.current.nextLikesOffset;
+            while (more && !controller.signal.aborted) {
+              const response = await fetch(`/api/yandex/tracks?offset=${offset}`, { signal: controller.signal, headers: { 'X-Yandex-Session': yandexSession } });
+              const data = await response.json();
+              if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : 'Поиск прервался. Уже найденные треки доступны.');
+              const page = yandexPage(data);
+              if (controller.signal.aborted) return;
+              applyYandexPage(data, true);
+              if (page.has_more && page.next_offset <= offset) throw new Error('Сервис повторил страницу. Попробуйте обновить медиатеку.');
+              offset = page.next_offset; more = page.has_more;
+            }
+          } else if (librarySource === musicProvider) {
+            let page = libraryData.current.musicLibraries[musicProvider];
+            const cursors = new Set<string>();
+            while (page?.has_more && page.next_cursor && !controller.signal.aborted) {
+              const cursor = page.next_cursor;
+              if (cursors.has(cursor)) throw new Error('Сервис повторил страницу. Попробуйте обновить медиатеку.');
+              cursors.add(cursor);
+              page = await musicJson(`/api/music/${musicProvider}/tracks?cursor=${encodeURIComponent(cursor)}`, { signal: controller.signal, headers: { 'X-Music-Session': page.session } });
+              if (controller.signal.aborted) return;
+              acceptMusic(musicProvider, page, true);
+              if (page.library_error) throw new Error(page.library_error);
+            }
+          }
+        } catch (cause) { if (!controller.signal.aborted) setLibraryScanError(cause instanceof Error ? cause.message : 'Не удалось проверить все лайки.'); }
+        finally { if (!controller.signal.aborted) setLibraryScanning(false); }
+      })();
+    }, 350);
+    return () => { clearTimeout(timer); controller.abort(); };
+  }, [librarySource, isMobile, drawer, yandexSession, hasMoreLikes, selectedLibrary?.session, selectedLibrary?.has_more, loadingLikes, musicBusy, librarySearchAttempt]);
+
   const filteredYandexTracks = useMemo(() => {
     const query = yandexSearch.trim().toLocaleLowerCase('ru');
     return query ? yandexTracks.filter((track) => `${track.title} ${track.artist}`.toLocaleLowerCase('ru').includes(query)) : yandexTracks;
@@ -1643,7 +1815,15 @@ export default function App() {
   const musicCapability = musicCapabilities[musicProvider];
   const musicCooldown = Math.max(0, Math.ceil(((musicRetryUntil[musicProvider] || 0) - musicClock) / 1000));
   const filteredMusic = (musicLibrary?.tracks || []).filter((track) => `${track.title} ${track.artist}`.toLocaleLowerCase('ru').includes(musicSearch.trim().toLocaleLowerCase('ru')));
-  return <main className={`app ${telegramInitData ? 'telegram-app' : ''}`}><style>{STYLES}</style><div className="backdrop" aria-hidden="true"><div className="backdrop-art" style={{ '--party-image': `url("${partyImage}")` } as CSSProperties} /></div><div className="shell">
+  const libraryMatches = librarySource === 'yandex' ? filteredYandexTracks.length : filteredMusic.length;
+  useEffect(() => {
+    if (!isMobile || drawer !== 'library' || librarySource === 'youtube' || !libraryEnd.current || libraryMatches <= libraryLimit) return;
+    const observer = new IntersectionObserver(([entry]) => { if (entry.isIntersecting) setLibraryLimit((limit) => limit + 50); },
+      { root: document.querySelector('.library-drawer .drawer-body'), rootMargin: '200px' });
+    observer.observe(libraryEnd.current);
+    return () => observer.disconnect();
+  }, [isMobile, drawer, librarySource, libraryMatches, libraryLimit]);
+  return <main onPointerDown={startPanelSwipe} onPointerUp={finishPanelSwipe} onPointerCancel={() => { panelGesture.current = null; }} className={`app ${telegramInitData ? 'telegram-app' : ''}`}><style>{STYLES}</style><div className="backdrop" aria-hidden="true"><div className="backdrop-art" style={{ '--party-image': `url("${partyImage}")` } as CSSProperties} /></div><div className="shell">
     <header className="topbar"><div className="brand"><span className="brandmark"><img src={brandLogo} width="54" height="54" alt="" /></span> PRADA SOUND</div>
       {me ? <span className="profile-chip"><Avatar profile={me} size={32} /><span>{profileLabel(me)}</span></span> :
         <span className="pill"><span className="dot" /> PRIVATE MUSIC ROOM</span>}</header>
@@ -1671,6 +1851,9 @@ export default function App() {
         {status === 'closed' && <button className="button" onClick={() => setAttempt((value) => value + 1)}>Подключиться снова</button>}
         <button className="button ghost" onClick={() => { setSession(null); setQueueItems([]); setTrackId(''); setError(''); }}>Выйти</button>
       </div></div>
+      {isMobile && <><button className={`drawer-scrim ${drawer ? 'visible' : ''}`} aria-label="Закрыть панель" tabIndex={drawer ? 0 : -1} onClick={() => setDrawer(null)} />
+        <button className="edge-handle edge-left" aria-label="Открыть общую очередь" onClick={() => setDrawer('queue')}><span>Очередь</span><i>{queueItems.length}</i></button>
+        <button className="edge-handle edge-right" aria-label="Открыть медиатеку" onClick={() => setDrawer('library')}><span>Медиатека</span><i>‹</i></button></>}
       <div className="dashboard"><div className="maincol">
         <section className="hostcard" aria-label="Организатор вечеринки"><Avatar profile={mainProfile} size={54} />
           <div><span className="eyebrow">{session.role === 'Main' ? 'ВЫ ПРИНИМАЕТЕ ГОСТЕЙ' : 'ВЫ В ГОСТЯХ У'}</span>
@@ -1700,7 +1883,7 @@ export default function App() {
               <p>{currentTrack ? sourceName(currentTrack) : 'Добавьте первый трек, чтобы начать.'}</p>
               {currentItem?.canonical_url && <a className="music-source" href={currentItem.canonical_url} target="_blank" rel="noopener noreferrer">Открыть в {sourceName(currentTrack)} ↗</a>}
               {currentTrack ? <div className="bars" aria-hidden="true">{Array.from({ length: 20 }, (_, i) => <i key={i} />)}</div> :
-                <button className="button tiny stage-add" onClick={() => document.getElementById('add-track')?.scrollIntoView({ behavior: 'smooth', block: 'center' })}>Добавить трек ↓</button>}
+                <button className="button tiny stage-add" onClick={() => { selectLibrary('youtube'); if (isMobile) setDrawer('library'); else document.getElementById('add-track')?.scrollIntoView({ behavior: 'smooth', block: 'center' }); }}>Добавить трек ↓</button>}
             </div>
             <div className="miniPlayer" style={isSpotify ? { minHeight: 352, aspectRatio: 'auto' } : undefined}>
               {isSpotify ? <div ref={spotifyMount} style={{ width: '100%', minHeight: 352 }} /> : fallbackId === currentTrack && currentTrack ? <div key={currentKey} ref={ytMount} className="fallbackVideo" /> :
@@ -1783,7 +1966,7 @@ export default function App() {
             {isYandex && audioError && currentItem?.owner_id !== ownerId && <p className="muted small">
               Доступ к этому треку предоставляет {profileLabel(profiles[currentItem.owner_id])}. Если доступ истёк, попросите автора подключить Яндекс Музыку заново.</p>}
             {isYandex && audioError && currentItem?.owner_id === ownerId && <button className="button tiny" onClick={() =>
-              document.getElementById('yandex-auth')?.scrollIntoView({ behavior: 'smooth', block: 'center' })}>
+              { selectLibrary('yandex'); if (isMobile) setDrawer('library'); else document.getElementById('yandex-auth')?.scrollIntoView({ behavior: 'smooth', block: 'center' }); }}>
               Подключить свой Яндекс ↓</button>}
             {audioError && status === 'connected' && <button className="button tiny" onClick={() => {
               if (currentItem) preparedAudio.current.delete(audioCacheKey(currentItem));
@@ -1792,33 +1975,6 @@ export default function App() {
             {!audioUrl && !audioError && !isSpotify && fallbackId !== currentTrack && <p className="muted small">Получаем аудиопоток…</p>}
           </> : null}</div>
         </section>}
-        <section className="card cardpad"><div className="sectionhead"><div><span className="eyebrow">ОБЩИЙ РИТМ</span><h3>Очередь треков</h3></div><span className="pill">{queueItems.length} треков</span></div>
-          <div aria-live="polite">{queueItems.length ? <ol className="queue">{queueItems.map((item, index) => <li className={index === 0 ? 'current' : ''} key={item.id}
-            draggable={session.role === 'Main' && index > 0 && status === 'connected' && !queueActionPending}
-            onDragStart={(event) => { draggingItem.current = item.id; event.dataTransfer.effectAllowed = 'move'; }}
-            onDragOver={(event) => { if (session.role === 'Main' && index > 0) event.preventDefault(); }}
-            onDrop={(event) => { event.preventDefault(); if (session.role === 'Main' && index > 0 && draggingItem.current && draggingItem.current !== item.id)
-              changeQueue('move_track', draggingItem.current, index); draggingItem.current = ''; }}
-            onDragEnd={() => { draggingItem.current = ''; }}>
-            <span className="index">{index === 0 ? '♫' : String(index + 1).padStart(2, '0')}</span>
-            <div className="trackmeta"><strong>{trackTitles[item.track_id] || item.track_id}</strong>
-              <small>{sourceName(item.track_id)}{index === 0 ? ' · Сейчас играет' : ''}</small>
-              <span className="added-by"><Avatar profile={profiles[item.owner_id]} size={23} />
-                Добавил{item.owner_id === ownerId ? '(а) вы' : `(а) ${profileLabel(profiles[item.owner_id])}`}</span></div>
-            {session.role === 'Main' && index > 0 && <span className="queueControls">
-              {index > 1 && <button className="button tiny" disabled={queueActionPending || status !== 'connected'} onClick={() => changeQueue('move_track', item.id, 1)}>Играть следующим</button>}
-              <button className="button tiny" aria-label="Поднять трек" title="Поднять" disabled={index <= 1 || queueActionPending || status !== 'connected'} onClick={() => changeQueue('move_track', item.id, index - 1)}>↑</button>
-              <button className="button tiny" aria-label="Опустить трек" title="Опустить" disabled={index >= queueItems.length - 1 || queueActionPending || status !== 'connected'} onClick={() => changeQueue('move_track', item.id, index + 1)}>↓</button>
-            </span>}
-            {item.owner_id === ownerId && <button className="button tiny" aria-label="Удалить свой трек" disabled={queueActionPending || status !== 'connected'} onClick={() => changeQueue('remove_track', item.id)}>Удалить</button>}
-          </li>)}</ol> : <p className="muted small">Здесь скоро появится музыка. Добавьте первый трек.</p>}</div>
-        </section>
-        <section className="card cardpad" id="add-track"><div className="sectionhead"><div><span className="eyebrow">ВАШ ВКЛАД</span><h3>Добавить трек</h3></div></div>
-          <form className="addform" onSubmit={addTrack}><input aria-label="YouTube ссылка или Video ID" value={trackId} onChange={(event) => setTrackId(event.target.value)} required
-            placeholder="Ссылка YouTube или Video ID" /><button className="button primary" disabled={status !== 'connected' || !trackId.trim() || loadingMetadata}>{loadingMetadata ? 'Ищем название…' : '+ В очередь'}</button></form>
-          <p className="muted small">Подойдут youtube.com/watch?v=…, youtu.be/… или 11-значный ID.</p>
-        </section>
-      </div><div className={`sidecol ${yandexTracks.length ? 'music-ready' : ''}`}>
         <section className="card cardpad share-card" id="share-room"><div className="sectionhead"><div><span className="eyebrow">ПРИГЛАСИТЬ ДРУЗЕЙ</span><h3>Поделиться комнатой</h3></div></div>
           <div className="share"><div className="sharetext"><p className="muted small">Отправьте ссылку или покажите QR-код.</p>
             <button className="button sharelink" title={inviteUrl} onClick={() => void copy(inviteUrl, 'Ссылка')}>{inviteUrl}</button>
@@ -1828,7 +1984,42 @@ export default function App() {
             <p className="roomid mono">ID: {session.lobby_id}</p></div>
             {qr ? <svg className="qr" viewBox="0 0 53 53" role="img" aria-label="QR-код приглашения"><path fill="#111" d={qr} /></svg> : <span className="muted small">Ссылка слишком длинная для QR</span>}
           </div>{['localhost', '127.0.0.1'].includes(location.hostname) && <p className="muted small">Для входа с телефона откройте сайт по адресу компьютера в вашей сети или по домену — localhost на телефоне не откроется.</p>}</section>
-        <section className="card cardpad yandex-card" id="yandex-auth"><div className="sectionhead"><div><span className="eyebrow">ВАША МУЗЫКА</span><h3>Яндекс Музыка</h3></div></div>
+      </div><div className="sidecol">
+        <aside className={`drawer queue-drawer ${drawer === 'queue' ? 'is-open' : ''}`} inert={isMobile && drawer !== 'queue'} aria-hidden={isMobile && drawer !== 'queue'} role={isMobile ? 'dialog' : undefined} aria-modal={isMobile && drawer === 'queue' ? true : undefined} aria-label="Общая очередь">
+          <header className="drawer-header"><div><span className="eyebrow">В ОДНОМ РИТМЕ</span><h2>Общая очередь</h2></div><button className="drawer-close mobile-only" aria-label="Закрыть панель" onClick={() => setDrawer(null)}>×</button></header>
+          <p className="mobile-only swipe-hint">← {session.role === 'Main' ? 'Удалить трек · → Играть следующим' : 'Удалить свой трек'}</p>
+          <div className="drawer-body">        <section className="card cardpad queue-card"><div className="sectionhead"><div><span className="eyebrow">ОБЩИЙ РИТМ</span><h3>Очередь треков</h3></div><span className="pill">{queueItems.length} треков</span></div>
+          <div aria-live="polite">{queueItems.length ? <ol className="queue">{queueItems.map((item, index) => <SwipeTrack onLeft={status === 'connected' && !queueActionPending && (session.role === 'Main' || item.owner_id === ownerId) ? () => changeQueue('remove_track', item.id) : undefined} onRight={status === 'connected' && !queueActionPending && session.role === 'Main' && index > 1 ? () => changeQueue('move_track', item.id, 1) : undefined} rightLabel="Следующим" className={index === 0 ? 'current' : ''} key={item.id}
+            draggable={!isMobile && session.role === 'Main' && index > 0 && status === 'connected' && !queueActionPending}
+            onDragStart={(event) => { draggingItem.current = item.id; event.dataTransfer.effectAllowed = 'move'; }}
+            onDragOver={(event) => { if (session.role === 'Main' && index > 0) event.preventDefault(); }}
+            onDrop={(event) => { event.preventDefault(); if (session.role === 'Main' && index > 0 && draggingItem.current && draggingItem.current !== item.id)
+              changeQueue('move_track', draggingItem.current, index); draggingItem.current = ''; }}
+            onDragEnd={() => { draggingItem.current = ''; }}>
+            <span className="index">{index === 0 ? '♫' : String(index + 1).padStart(2, '0')}</span>
+            <div className="trackmeta"><strong>{queueCaption(item).title}</strong>
+              <small>{queueCaption(item).artist}{index === 0 ? ' · Сейчас играет' : ''}</small></div>
+              <span className="added-by" title={profileLabel(profiles[item.owner_id])}><Avatar profile={profiles[item.owner_id]} size={23} />
+                <span>{item.owner_id === ownerId ? 'Вы' : profileLabel(profiles[item.owner_id])}</span></span>
+            {session.role === 'Main' && index > 0 && <span className="queueControls">
+              {index > 1 && <button className="button tiny" disabled={queueActionPending || status !== 'connected'} onClick={() => changeQueue('move_track', item.id, 1)}>Играть следующим</button>}
+              <button className="button tiny" aria-label="Поднять трек" title="Поднять" disabled={index <= 1 || queueActionPending || status !== 'connected'} onClick={() => changeQueue('move_track', item.id, index - 1)}>↑</button>
+              <button className="button tiny" aria-label="Опустить трек" title="Опустить" disabled={index >= queueItems.length - 1 || queueActionPending || status !== 'connected'} onClick={() => changeQueue('move_track', item.id, index + 1)}>↓</button>
+            </span>}
+            {(session.role === 'Main' || item.owner_id === ownerId) && <button className="button tiny track-action" aria-label="Удалить трек" disabled={queueActionPending || status !== 'connected'} onClick={() => changeQueue('remove_track', item.id)}>Удалить</button>}
+          </SwipeTrack>)}</ol> : <p className="muted small">Здесь скоро появится музыка. Добавьте первый трек.</p>}</div>
+        </section>
+</div>
+        </aside>
+        <aside className={`drawer library-drawer ${drawer === 'library' ? 'is-open' : ''}`} inert={isMobile && drawer !== 'library'} aria-hidden={isMobile && drawer !== 'library'} role={isMobile ? 'dialog' : undefined} aria-modal={isMobile && drawer === 'library' ? true : undefined} aria-label="Ваша медиатека">
+          <header className="drawer-header"><div><span className="eyebrow">МУЗЫКА, КОТОРАЯ ВАША</span><h2>Ваша медиатека</h2></div><button className="drawer-close mobile-only" aria-label="Закрыть панель" onClick={() => setDrawer(null)}>×</button></header>
+          <div className="library-tabs" role="tablist" aria-label="Источник музыки">{(['yandex', 'spotify', 'soundcloud', 'youtube'] as LibrarySource[]).map((source) => <button key={source} role="tab" aria-selected={librarySource === source} className={librarySource === source ? 'active' : ''} onClick={() => selectLibrary(source)}><span className={`service-icon ${source}`}>{source === 'yandex' ? 'Я' : source === 'spotify' ? '◉' : source === 'soundcloud' ? '☁' : '▶'}</span><span>{source === 'yandex' ? 'Яндекс' : source === 'spotify' ? 'Spotify' : source === 'soundcloud' ? 'SoundCloud' : 'YouTube'}</span></button>)}</div>
+          <p className="mobile-only swipe-hint">Смахните трек вправо — он появится в общей очереди →</p>
+          {libraryScanning && <p className="library-progress" role="status"><span />{libraryQuery ? 'Поиск по всем лайкам' : 'Загружаем медиатеку'} · проверено {librarySource === 'yandex' ? yandexTracks.length : musicLibrary?.tracks.length || 0} треков</p>}
+          {libraryScanError && <p className="notice" role="alert">{libraryScanError} <button className="button tiny" onClick={() => setLibrarySearchAttempt((value) => value + 1)}>Продолжить поиск</button></p>}
+          <div className="drawer-body">
+        <section className="card cardpad yandex-card" id="yandex-auth" hidden={librarySource !== 'yandex'}><div className="sectionhead"><div><span className="eyebrow">ВАША МУЗЫКА</span><h3>Яндекс Музыка</h3></div></div>
+          <details className="account-connect" open={!yandexConnected || Boolean(yandexLogin)}><summary>{yandexConnected ? 'Аккаунт подключён · Настройки' : 'Подключить свою музыку'}</summary>
           <p className="muted small">Подключите аккаунт, чтобы добавить лайкнутые треки. Добавленные вами треки звучат на устройстве хоста с вашего доступа к Яндекс Музыке.</p>
           <button className="button primary" onClick={() => void startYandexLogin()} disabled={loadingLikes}>{yandexConnected ? 'Подключить заново' : 'Подключить Яндекс Музыку →'}</button>
           {yandexConnected && <button className="button tiny" style={{ marginLeft: 8 }} onClick={() => void refreshYandexLikes()} disabled={loadingLikes}>Обновить лайки</button>}
@@ -1840,26 +2031,24 @@ export default function App() {
           </div>}
           {loadingLikes && <p className="muted small" role="status">{yandexLogin ? 'Ждём подтверждения Яндекса…' : yandexConnected ? 'Загружаем лайки…' : 'Получаем код входа…'}</p>}
           {yandexError && <p className="notice" role="alert">{yandexError}</p>}
+          </details>
           {yandexConnected && <p className="muted small" role="status">Загружено треков: {yandexTracks.length}</p>}
           {yandexUnsupported > 0 && <p className="muted small">Некоторые записи ({yandexUnsupported}) пока недоступны нашему плееру. Остальные треки можно добавлять в очередь.</p>}
-          {yandexTracks.length > 0 && <label className="field">Поиск среди загруженных треков
+          {yandexTracks.length > 0 && <label className="field library-search">Поиск по всем лайкам
             <input value={yandexSearch} onChange={(event) => setYandexSearch(event.target.value)} placeholder="Название или исполнитель" aria-label="Поиск треков Яндекс Музыки" />
           </label>}
           {yandexTracks.length > 0 && status !== 'connected' && <p className="notice" role="status">Очередь комнаты {status === 'closed' ? 'отключена' : 'подключается'}.
             {status === 'closed' && <> <button className="button tiny" onClick={() => setAttempt((value) => value + 1)}>Подключиться снова</button></>}
           </p>}
-          {yandexTracks.length > 0 && filteredYandexTracks.length === 0 && <p className="muted small">Среди загруженных треков ничего не найдено.</p>}
-          {filteredYandexTracks.length > 0 && <ul className="likes">{filteredYandexTracks.map((track) => <li key={track.id}>
+          {yandexTracks.length > 0 && filteredYandexTracks.length === 0 && <p className="muted small">{libraryScanning ? 'Ищем в остальных лайках…' : 'Треки не найдены.'}</p>}
+          {filteredYandexTracks.length > 0 && <ul className="likes">{filteredYandexTracks.slice(0, libraryLimit).map((track) => <SwipeTrack key={track.id} onRight={status === 'connected' && track.playable ? () => enqueue(`yandex_${track.id}`, `${track.title} — ${track.artist}`) : undefined}>
             <div className="trackmeta"><strong>{track.title}</strong><small>{track.artist}</small>{!track.playable && <small>{track.reason}</small>}</div>
-            <button className="button tiny" disabled={status !== 'connected' || !track.playable} onClick={() => enqueue(`yandex_${track.id}`, `${track.title} — ${track.artist}`)}>{track.playable ? '+ В очередь' : 'Недоступно'}</button>
-          </li>)}</ul>}
-          {yandexConnected && hasMoreLikes && <button className="button tiny" onClick={() => void showMoreLikes()} disabled={loadingLikes}>Показать ещё</button>}
+            <button className="button tiny track-action" disabled={status !== 'connected' || !track.playable} onClick={() => enqueue(`yandex_${track.id}`, `${track.title} — ${track.artist}`)}>{track.playable ? '+ В очередь' : 'Недоступно'}</button>
+          </SwipeTrack>)}</ul>}
+          {(filteredYandexTracks.length > libraryLimit || yandexConnected && hasMoreLikes) && <button className="button tiny load-more" onClick={() => { setLibraryLimit((value) => value + 50); if (filteredYandexTracks.length <= libraryLimit && !libraryScanning) void showMoreLikes(); }} disabled={loadingLikes || libraryScanning}>Показать ещё</button>}
         </section>
-        <section className="card cardpad music-card" id="music-services"><span className="eyebrow">БОЛЬШЕ МУЗЫКИ</span>
-          <h3>Другие библиотеки</h3>
-          <div className="music-tabs" role="tablist" aria-label="Музыкальный сервис">{(['soundcloud', 'spotify', 'vk'] as MusicProvider[]).map((provider) =>
-            <button key={provider} role="tab" aria-selected={musicProvider === provider} className={`button tiny ${musicProvider === provider ? 'primary' : ''}`} disabled={musicBusy}
-              onClick={() => { setMusicProvider(provider); setMusicSearch(''); setMusicUrl(''); setMusicError(''); }}>{MUSIC_LABELS[provider]}</button>)}</div>
+        <section className="card cardpad music-card" id="music-services" hidden={!(['spotify', 'soundcloud', 'vk'] as string[]).includes(librarySource)}><span className="eyebrow">БОЛЬШЕ МУЗЫКИ</span>
+          <h3>{MUSIC_LABELS[musicProvider]}</h3>
           <div role="tabpanel" aria-label={MUSIC_LABELS[musicProvider]}>
             {musicProvider === 'soundcloud' && <p className="muted small">Импортируйте публичные лайки по ссылке на профиль — бесплатного аккаунта достаточно. Приватная библиотека доступна через вход, когда подключено приложение SoundCloud.</p>}
             {musicProvider === 'spotify' && <p className="muted small">{musicCapability?.native_library ? 'Подключите аккаунт, чтобы загрузить любимые треки. ' : 'Вставьте ссылку на публичный плейлист. '}По умолчанию добавляем оригинал Spotify: хост слушает его в родном плеере, где может потребоваться вход с Premium. Подбор через YouTube включается отдельно ниже.</p>}
@@ -1876,7 +2065,7 @@ export default function App() {
             </details>}
             {musicCapability?.oauth && <button className="button primary" disabled={musicBusy} onClick={() => void startMusicLogin()}>Подключить {MUSIC_LABELS[musicProvider]} ↗</button>}
             {musicCapability && !musicCapability.oauth && !musicCapability.public_import && <p className="muted small">{musicCapability.reason}</p>}
-            {musicDeviceLogin && <div className="authbox" style={{ marginTop: 16 }}><span className="eyebrow">ПОДТВЕРДИТЕ ВХОД {MUSIC_LABELS[musicDeviceLogin.provider]}</span>
+            {musicDeviceLogin?.provider === musicProvider && <div className="authbox" style={{ marginTop: 16 }}><span className="eyebrow">ПОДТВЕРДИТЕ ВХОД {MUSIC_LABELS[musicDeviceLogin.provider]}</span>
               <p className="muted small">Откройте Spotify и подтвердите вход.</p>
               {!Array.from(new URL(musicDeviceLogin.verification_url).searchParams.values()).some((value) => value.replace(/[- ]/g, '').toUpperCase() === musicDeviceLogin.user_code.replace(/[- ]/g, '').toUpperCase()) && <><p className="muted small">Если Spotify запросит код, введите:</p><code className="code mono">{musicDeviceLogin.user_code}</code></>}
               <div className="row" style={{ flexWrap: 'wrap', marginTop: 14 }}><a className="button primary linklike" href={musicDeviceLogin.verification_url} target="_blank" rel="noopener noreferrer"
@@ -1907,16 +2096,28 @@ export default function App() {
               <div className="row" style={{ justifyContent: 'space-between', flexWrap: 'wrap' }}><p className="muted small">{musicLibrary.library_error ? 'Вход подтверждён, библиотека недоступна' : musicLibrary.empty_library ? 'Вход подтверждён, список треков пуст' : musicLibrary.authenticated ? 'Библиотека подключена' : 'Публичный импорт'} · {musicLibrary.tracks.length} треков</p>
                 <span className="row" style={{ flexWrap: 'wrap' }}><button className="button tiny" disabled={musicBusy || musicCooldown > 0} onClick={restoreMusic}>Обновить библиотеку</button>
                 <button className="button tiny" disabled={musicBusy} onClick={() => void disconnectMusic()}>Отключить</button></span></div>
-              <label className="field">Поиск среди загруженных треков<input value={musicSearch} onChange={(event) => setMusicSearch(event.target.value)} placeholder="Название или исполнитель" aria-label={`Поиск ${MUSIC_LABELS[musicProvider]}`} /></label>
-              <ul className="likes">{filteredMusic.map((track, index) => <li key={`${track.id}:${index}`}><div className="trackmeta"><strong>{track.title}</strong><small>{track.artist || MUSIC_LABELS[musicProvider]}</small>
+              <label className="field library-search">Поиск по всей медиатеке<input value={musicSearch} onChange={(event) => setMusicSearch(event.target.value)} placeholder="Название или исполнитель" aria-label={`Поиск ${MUSIC_LABELS[musicProvider]}`} /></label>
+              <ul className="likes">{filteredMusic.slice(0, libraryLimit).map((track, index) => <SwipeTrack key={`${track.id}:${index}`} onRight={status === 'connected' && !musicBusy && track.playable ? () => enqueueMusic(track) : undefined}><div className="trackmeta"><strong>{track.title}</strong><small>{track.artist || MUSIC_LABELS[musicProvider]}</small>
                 {track.canonical_url && <a className="music-source" href={track.canonical_url} target="_blank" rel="noopener noreferrer">{MUSIC_LABELS[musicProvider]} ↗</a>}
                 {!track.playable && <small>{track.reason || 'Полный трек недоступен'}</small>}</div>
-                <button className="button tiny" disabled={status !== 'connected' || musicBusy || !track.playable} onClick={() => enqueueMusic(track)}>+ В очередь</button></li>)}</ul>
-              {filteredMusic.length === 0 && <p className="muted small">Треки не найдены.</p>}
-              {musicLibrary.has_more && <button className="button tiny" disabled={musicBusy} onClick={moreMusic}>Показать ещё</button>}
+                <button className="button tiny track-action" disabled={status !== 'connected' || musicBusy || !track.playable} onClick={() => enqueueMusic(track)}>+ В очередь</button></SwipeTrack>)}</ul>
+              {filteredMusic.length === 0 && <p className="muted small">{libraryScanning ? 'Ищем в остальных лайках…' : 'Треки не найдены.'}</p>}
+              {(filteredMusic.length > libraryLimit || musicLibrary.has_more) && <button className="button tiny load-more" disabled={musicBusy || libraryScanning} onClick={() => { setLibraryLimit((value) => value + 50); if (filteredMusic.length <= libraryLimit) moreMusic(); }}>Показать ещё</button>}
             </>}
           </div>
         </section>
+        <section className="card cardpad" id="add-track" hidden={librarySource !== 'youtube'}><div className="sectionhead"><div><span className="eyebrow">ИЗ YOUTUBE</span><h3>YouTube</h3></div></div>
+          <form className="addform" onSubmit={(event) => { if (isMobile) event.preventDefault(); else void addTrack(event); }}><input aria-label="YouTube ссылка или Video ID" value={trackId} onChange={(event) => setTrackId(event.target.value)} required
+            placeholder="Ссылка YouTube или Video ID" /><button className="button primary track-action" disabled={status !== 'connected' || !trackId.trim() || loadingMetadata}>{loadingMetadata ? 'Ищем название…' : '+ В очередь'}</button></form>
+          <p className="muted small">Подойдут youtube.com/watch?v=…, youtu.be/… или 11-значный ID.</p>
+          {youtubeCandidate && <ul className="likes"><SwipeTrack onRight={status === 'connected' ? () => { if (enqueue(youtubeCandidate.id, `${youtubeCandidate.title} — ${youtubeCandidate.artist}`)) { setTrackId(''); setYoutubeCandidate(null); } } : undefined}><div className="trackmeta"><strong>{youtubeCandidate.title}</strong><small>{youtubeCandidate.artist}</small></div><span className="source-dot">YT</span></SwipeTrack></ul>}
+          <p className="mobile-only swipe-hint">Ссылка превратится в трек. Смахните его вправо, чтобы добавить.</p>
+        </section>
+
+          <button className="library-vk" onClick={() => selectLibrary('vk')}>VK Музыка · экспериментально ↗</button>
+          <div ref={libraryEnd} className="library-end" aria-hidden="true" />
+          </div>
+        </aside>
       </div></div>
     </>}
   </div></main>;

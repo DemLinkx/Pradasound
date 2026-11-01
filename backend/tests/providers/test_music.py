@@ -290,7 +290,8 @@ def test_hls_manifest_only_maps_allowed_hosts():
         )
 
 
-def test_public_soundcloud_import_restores_page(client, monkeypatch):
+@pytest.mark.parametrize("offset", [50, 500])
+def test_public_soundcloud_import_restores_page(client, monkeypatch, offset):
     offsets = []
 
     async def extract(url, *, flat=False, offset=0):
@@ -317,10 +318,10 @@ def test_public_soundcloud_import_restores_page(client, monkeypatch):
     assert first.json()["authenticated"] is False
     assert music.validate_track("soundcloud", handle, "12345")["title"] == "A song"
     next_page = client.get(
-        "/api/music/soundcloud/tracks?cursor=50", headers={"X-Music-Session": handle}
+        f"/api/music/soundcloud/tracks?cursor={offset}", headers={"X-Music-Session": handle}
     )
     assert next_page.status_code == 200
-    assert offsets == [0, 50]
+    assert offsets == [0, offset]
     mismatch = client.post(
         "/api/music/soundcloud/public",
         json={"url": "https://soundcloud.com/other/likes", "session": handle},

@@ -58,6 +58,27 @@ def test_empty_likes_are_a_valid_connected_library():
     assert not page.has_more and page.next_offset == 0
 
 
+def test_loading_all_likes_reuses_ids_and_refreshes_on_first_page():
+    calls = []
+
+    def likes(**kwargs):
+        calls.append(1)
+        return Item(tracks=[Item(track_id=str(i)) for i in range(551)])
+
+    client = Item(users_likes_tracks=likes, tracks=lambda ids, **kwargs: [
+        Item(id=i, title=f'Song {i}', artists=[]) for i in ids
+    ])
+    first = main.liked_page(client, 0)
+    later = main.liked_page(client, 500)
+    last = main.liked_page(client, 550)
+    assert first.has_more and len(first.tracks) == 50
+    assert later.tracks[0].id == '500' and later.has_more
+    assert len(last.tracks) == 1 and not last.has_more
+    assert len(calls) == 1
+    main.liked_page(client, 0)
+    assert len(calls) == 2
+
+
 @pytest.mark.parametrize("library_fails", [False, True])
 def test_device_login_preserves_authorization_for_unusual_or_temporarily_failed_library(
     monkeypatch,
