@@ -16,6 +16,22 @@ const vkToken = sourceFunction('vkAccessToken');
 const spotifyPlayback = sourceFunction('spotifyPlayback');
 const listeningPosition = sourceFunction('listeningPosition');
 const playbackSnapshot = sourceFunction('playbackSnapshot');
+const drawerSwipe = sourceFunction('drawerSwipe');
+
+test('a horizontal swipe opens the matching panel and ignores vertical scrolling', () => {
+  assert.equal(drawerSwipe(-80, 5, null), 'library');
+  assert.equal(drawerSwipe(80, -5, null), 'queue');
+  assert.equal(drawerSwipe(-35, 2, null), undefined);
+  assert.equal(drawerSwipe(60, 90, null), undefined);
+  assert.equal(drawerSwipe(-60, 90, null), undefined);
+});
+
+test('panels close only in the direction opposite to opening', () => {
+  assert.equal(drawerSwipe(80, 5, 'library'), null);
+  assert.equal(drawerSwipe(-80, 5, 'library'), undefined);
+  assert.equal(drawerSwipe(-80, 5, 'queue'), null);
+  assert.equal(drawerSwipe(80, 5, 'queue'), undefined);
+});
 
 test('one unusual or malformed entry does not reject all liked tracks', () => {
   const page = parse({ tracks: [

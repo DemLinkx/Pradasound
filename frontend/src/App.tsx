@@ -9,8 +9,14 @@ import party3 from './assets/party-3.jpg';
 type Session = { lobby_id: string; role: 'Main' | 'Member'; host_token?: string };
 type LibrarySource = 'yandex' | 'spotify' | 'soundcloud' | 'youtube' | 'vk';
 
-function SwipeTrack({ children, onRight, onLeft, rightLabel = 'В очередь', leftLabel = 'Удалить', ...props }:
-  HTMLAttributes<HTMLLIElement> & { children: ReactNode; onRight?: () => void; onLeft?: () => void; rightLabel?: string; leftLabel?: string }) {
+function drawerSwipe(dx: number, dy: number, open: 'queue' | 'library' | null): 'queue' | 'library' | null | undefined {
+  if (Math.abs(dx) < 52 || Math.abs(dx) < Math.abs(dy) * 1.3) return undefined;
+  if (open) return (open === 'library' && dx > 0 || open === 'queue' && dx < 0) ? null : undefined;
+  return dx < 0 ? 'library' : 'queue';
+}
+
+function SwipeTrack({ children, onRight, onLeft, rightLabel = 'В очередь', leftLabel = 'Удалить', leftDestructive = true, ...props }:
+  HTMLAttributes<HTMLLIElement> & { children: ReactNode; onRight?: () => void; onLeft?: () => void; rightLabel?: string; leftLabel?: string; leftDestructive?: boolean }) {
   const gesture = useRef<{ x: number; y: number; locked: boolean; dx: number } | null>(null);
   const [offset, setOffset] = useState(0);
   const end = (event: ReactPointerEvent<HTMLLIElement>, cancel = false) => {
@@ -39,7 +45,7 @@ function SwipeTrack({ children, onRight, onLeft, rightLabel = 'В очередь
       drag.dx = dx > 0 && onRight || dx < 0 && onLeft ? Math.max(-120, Math.min(120, dx)) : 0;
       setOffset(drag.dx);
     }} onPointerUp={(event) => end(event)} onPointerCancel={(event) => end(event, true)}>
-    <span className={`swipe-reveal ${offset < 0 ? 'delete' : ''}`} aria-hidden="true">{offset < 0 ? `${leftLabel} ←` : `→ ${rightLabel}`}</span>
+    <span className={`swipe-reveal ${offset < 0 ? `left-action ${leftDestructive ? 'delete' : ''}` : ''}`} aria-hidden="true">{offset < 0 ? `${leftLabel} ←` : `→ ${rightLabel}`}</span>
     <div className="swipe-content">{children}</div>
   </li>;
 }
@@ -374,8 +380,9 @@ const STYLES = `
   @media(max-width:550px){.brandmark{width:44px;height:44px}.topbar>.pill{display:none}}
   @media(prefers-reduced-motion:reduce){.backdrop-art,.backdrop:after,.bars i,.spectrum i,.landing-copy,.headline-accent,.copy-toast{animation:none}.button,.headline-word{transition:none}.headline-word:hover,.headline-word:active{transform:none}}
   [hidden]{display:none!important}.mobile-only{display:none}.drawer{min-width:0}.drawer-header{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:4px 0 18px}.queue-card>.sectionhead{display:none}.drawer-header h2{font-size:26px;letter-spacing:-.045em;margin:7px 0 0}.drawer-body{min-width:0}.drawer-body>.card{margin-bottom:16px}.library-tabs{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;padding:5px;background:#0b0d116e;border:1px solid #ffffff12;border-radius:17px;margin-bottom:16px}.library-tabs button{border:0;border-radius:12px;padding:11px 2px;color:#aeb4c0;background:transparent;display:grid;justify-items:center;gap:7px;font-size:10px;font-weight:650;transition:background .2s,color .2s}.library-tabs button.active{color:#ffab68;background:#ed8d3820;box-shadow:inset 0 0 0 1px #f4a45c40}.service-icon{font-size:20px;font-weight:800;line-height:24px;height:24px}.service-icon.spotify{font-size:26px}.service-icon.soundcloud{font-size:25px}.service-icon.youtube{font-size:17px}.library-vk{display:block;background:none;border:0;padding:16px 0;font-size:11px;color:#a6abb6}.library-progress{display:flex;gap:9px;align-items:center;font-size:12px;line-height:1.5;color:#efb982}.library-progress>span{width:7px;height:7px;flex:none;border-radius:50%;background:#ef9b54;animation:search-pulse 1s ease-in-out infinite alternate}@keyframes search-pulse{to{opacity:.3}}.source-dot{display:grid;place-items:center;width:32px;height:32px;background:#ffffff08;border:1px solid #ffffff14;border-radius:9px;font-size:10px;color:#aeb5be}
-  .queue li.swipe-row,.likes li.swipe-row{display:block;position:relative;overflow:hidden;padding:0;touch-action:pan-y;isolation:isolate}.swipe-content{position:relative;z-index:1;display:flex;align-items:center;gap:12px;min-width:0;padding:13px 12px;transform:translateX(var(--swipe-x,0px));transition:transform .25s cubic-bezier(.2,.8,.2,1);background:#24262bef}.swiping .swipe-content{transition:none}.swipe-row:focus-visible{outline:2px solid #f3a66b;outline-offset:2px}.drawer-header,.edge-handle,.swipe-content{user-select:none}.library-end{height:1px}.swipe-reveal{position:absolute;inset:0;display:flex;align-items:center;padding:0 14px;color:#1a140d;background:#eaa064;font-size:12px;font-weight:750;opacity:0;transition:opacity .12s}.swiping .swipe-reveal{opacity:1}.swipe-reveal.delete{justify-content:flex-end;background:#ad4943;color:#fff}.queue .swipe-content{display:grid;grid-template-columns:20px minmax(0,1fr) 44px;gap:8px 11px}.queue .trackmeta{width:100%;min-width:0;overflow:hidden;overflow-wrap:normal}.queue .trackmeta strong{font-size:14px;line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;word-break:normal}.queue .trackmeta small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;line-height:1.4}.queue .added-by{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;width:44px;margin:0;min-width:0;font-size:10px;font-weight:500;color:#b1b6bf}.queue .added-by>span{display:block;width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:center}.queueControls{grid-column:2;grid-row:2;flex-wrap:wrap}.queue .track-action{grid-column:3;grid-row:2;justify-self:end}.queueControls .button{padding:5px 7px;font-size:10px}.queue .button.track-action{padding:5px 7px;font-size:10px}.queue .index{width:auto}.likes .trackmeta{overflow:hidden;overflow-wrap:normal}.likes .trackmeta strong{font-size:14px;line-height:1.4}.likes .trackmeta small{font-size:12px;line-height:1.4}.library-drawer .likes{max-height:540px}.library-drawer .cardpad{padding:20px}.library-drawer h3{font-size:21px;margin-top:6px}.library-drawer .field{margin-top:16px}.swipe-hint{font-size:11px;line-height:1.6;color:#a3a9b5;margin:0 0 14px}.account-connect{margin:10px 0 16px}.account-connect summary{font-size:12px;color:#b4bac4;cursor:pointer}.account-connect[open] summary{margin-bottom:12px}.library-drawer .library-search{position:sticky;top:-1px;z-index:5;background:#191c22f5;padding:12px 0;margin:0 0 10px;backdrop-filter:blur(16px)}
+  .queue li.swipe-row,.likes li.swipe-row{display:block;position:relative;overflow:hidden;padding:0;touch-action:pan-y;isolation:isolate}.swipe-content{position:relative;z-index:1;display:flex;align-items:center;gap:12px;min-width:0;padding:13px 12px;transform:translateX(var(--swipe-x,0px));transition:transform .25s cubic-bezier(.2,.8,.2,1);background:#24262bef}.swiping .swipe-content{transition:none}.swipe-row:focus-visible{outline:2px solid #f3a66b;outline-offset:2px}.drawer-header,.edge-handle,.swipe-content{user-select:none}.library-end{height:1px}.swipe-reveal{position:absolute;inset:0;display:flex;align-items:center;padding:0 14px;color:#1a140d;background:#eaa064;font-size:12px;font-weight:750;opacity:0;transition:opacity .12s}.swiping .swipe-reveal{opacity:1}.swipe-reveal.left-action{justify-content:flex-end}.swipe-reveal.delete{justify-content:flex-end;background:#ad4943;color:#fff}.queue .swipe-content{display:grid;grid-template-columns:20px minmax(0,1fr) 44px;gap:8px 11px}.queue .trackmeta{width:100%;min-width:0;overflow:hidden;overflow-wrap:normal}.queue .trackmeta strong{font-size:14px;line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;word-break:normal}.queue .trackmeta small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;line-height:1.4}.queue .added-by{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;width:44px;margin:0;min-width:0;font-size:10px;font-weight:500;color:#b1b6bf}.queue .added-by>span{display:block;width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:center}.queueControls{grid-column:2;grid-row:2;flex-wrap:wrap}.queue .track-action{grid-column:3;grid-row:2;justify-self:end}.queueControls .button{padding:5px 7px;font-size:10px}.queue .button.track-action{padding:5px 7px;font-size:10px}.queue .index{width:auto}.likes .trackmeta{overflow:hidden;overflow-wrap:normal}.likes .trackmeta strong{font-size:14px;line-height:1.4}.likes .trackmeta small{font-size:12px;line-height:1.4}.library-drawer .likes{max-height:540px}.library-drawer .cardpad{padding:20px}.library-drawer h3{font-size:21px;margin-top:6px}.library-drawer .field{margin-top:16px}.swipe-hint{font-size:11px;line-height:1.6;color:#a3a9b5;margin:0 0 14px}.account-connect{margin:10px 0 16px}.account-connect summary{font-size:12px;color:#b4bac4;cursor:pointer}.account-connect[open] summary{margin-bottom:12px}.library-drawer .library-search{position:sticky;top:-1px;z-index:5;background:#191c22f5;padding:12px 0;margin:0 0 10px;backdrop-filter:blur(16px)}
   @media(max-width:850px){
+    html,body{overscroll-behavior-x:none}.app{touch-action:pan-y pinch-zoom;overscroll-behavior-x:none}.edge-swipe-zone{position:fixed;top:0;bottom:0;width:36px;z-index:64;touch-action:pan-y}.edge-swipe-left{left:0}.edge-swipe-right{right:0}
     .mobile-only{display:block}.drawer-scrim{display:block;position:fixed;inset:0;z-index:70;padding:0;border:0;background:#03050b9c;backdrop-filter:blur(7px);opacity:0;pointer-events:none;transition:opacity .3s}.drawer-scrim.visible{opacity:1;pointer-events:auto}.drawer{position:fixed;top:0;bottom:0;width:calc(100% - 24px);max-width:510px;z-index:80;background:linear-gradient(155deg,#1b1f28fa,#101218fc);border:1px solid #ffffff18;box-shadow:0 0 80px #000b;display:flex;flex-direction:column;gap:0;visibility:hidden;transition:transform .34s cubic-bezier(.2,.8,.2,1),visibility .34s;will-change:transform;padding-top:env(safe-area-inset-top,0px)}.queue-drawer{left:0;border-radius:0 26px 26px 0;transform:translateX(calc(-100% - 20px))}.library-drawer{right:0;border-radius:26px 0 0 26px;transform:translateX(calc(100% + 20px))}.drawer.is-open{transform:translateX(0);visibility:visible}.drawer-header{padding:26px 20px 18px;flex-shrink:0;touch-action:pan-y}.drawer-header h2{font-size:29px;line-height:1.12;letter-spacing:-.055em}.drawer-header .eyebrow{font-size:9px}.drawer-close{width:34px;height:34px;flex:none;display:grid;place-items:center;border:1px solid #ffffff1a;background:#ffffff07;border-radius:50%;font-size:23px;font-weight:300;line-height:1;color:#d5dae3}.drawer>.library-progress,.drawer>.notice{margin:0 20px 12px}.drawer>.swipe-hint{padding:0 20px;margin:0 0 16px}.drawer-body{overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;padding:0 16px calc(24px + env(safe-area-inset-bottom,0px));flex:1;min-height:0}.drawer-body>.card{border:0;border-radius:0;background:none;box-shadow:none;backdrop-filter:none;padding:0}.library-tabs{margin:0 16px 12px;flex-shrink:0;border-radius:16px;gap:4px}.library-tabs button{padding:12px 2px;font-size:10px}.library-drawer .sectionhead,.queue-card>.sectionhead{display:none}.library-drawer .likes{max-height:none;overflow:visible;margin-top:10px;gap:8px}.library-drawer .likes .swipe-content{padding:16px 14px}.library-drawer .likes .trackmeta strong{font-size:15px;font-weight:750}.library-drawer .likes .trackmeta small{font-size:12px}.drawer .queueControls,.drawer .track-action,.drawer .load-more,.stage-add{display:none!important}.queue .swipe-content{padding:16px 11px;grid-template-columns:18px minmax(0,1fr) 40px;gap:10px}.queue .added-by{width:40px}.queue .trackmeta strong{font-size:15px}.queue .trackmeta small{font-size:12px}.queue .index{font-size:11px}.edge-handle{position:fixed;top:48%;z-index:65;width:23px;height:132px;border:1px solid #f1a46c47;background:linear-gradient(180deg,#292a32ee,#151822f5);backdrop-filter:blur(15px);box-shadow:0 5px 25px #0006;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:9px;padding:9px 0;color:#f2ae78;touch-action:pan-y}.edge-handle span{writing-mode:vertical-rl;font-size:10px;font-weight:650;letter-spacing:.08em}.edge-handle i{font-style:normal;font-size:10px}.edge-left{left:0;border-radius:0 12px 12px 0;border-left:0}.edge-right{right:0;border-radius:12px 0 0 12px;border-right:0}.edge-left span{transform:rotate(180deg)}.sidecol{gap:0}.roomhead .actions{gap:8px}.roomhead .actions .button{font-size:12px;padding:9px 12px}.roomhead{margin-bottom:18px}.share-card{margin-top:2px}.hostcard{padding:17px!important}.hostcard .eyebrow{font-size:9px}.shell{padding-bottom:30px}.library-vk{font-size:10px}.drawer .authbox{padding:14px}.drawer .code{font-size:25px}.drawer .button.primary{font-size:14px;padding:13px 16px}.drawer .music-import{gap:14px}.drawer .music-consent{font-size:12px}.drawer .field{font-size:12px}.drawer .library-search input{padding:14px 13px}.drawer .library-search{font-size:11px;color:#a8b0be}.drawer .notice{font-size:12px}.drawer .small{font-size:12px;line-height:1.5}.drawer .added-by .avatar{flex:none}.queue .swipe-row.current .swipe-content{background:#44332af2}
   }
   @media(prefers-reduced-motion:reduce){.drawer,.drawer-scrim,.swipe-content,.library-progress>span{transition:none;animation:none}}
@@ -392,7 +399,8 @@ export default function App() {
   const [librarySearchAttempt, setLibrarySearchAttempt] = useState(0);
   const libraryEnd = useRef<HTMLDivElement>(null);
   const [youtubeCandidate, setYoutubeCandidate] = useState<{ id: string; title: string; artist: string } | null>(null);
-  const panelGesture = useRef<{ x: number; y: number; from: 'queue' | 'library'; close: boolean } | null>(null);
+  const panelGesture = useRef<{ id: number; x: number; y: number; open: 'queue' | 'library' | null; locked: boolean; done: boolean } | null>(null);
+  const panelClickUntil = useRef(0);
   const [partyImage] = useState(() => [party1, party2, party3][Math.floor(Math.random() * 3)]);
   const [session, setSession] = useState<Session | null>(() => {
     const params = new URLSearchParams(location.search);
@@ -1701,22 +1709,36 @@ export default function App() {
   }
 
   function startPanelSwipe(event: ReactPointerEvent<HTMLElement>) {
-    if (!isMobile || !session) return;
+    panelGesture.current = null;
+    if (!isMobile || !session || !event.isPrimary || event.button !== 0) return;
     const target = event.target as HTMLElement;
-    if (target.closest('.swipe-row,input,textarea,select')) return;
-    if (drawer && target.closest('.drawer-header')) panelGesture.current = { x: event.clientX, y: event.clientY, from: drawer, close: true };
-    else if (!drawer && (target.closest('.edge-left') || event.clientX < 30)) panelGesture.current = { x: event.clientX, y: event.clientY, from: 'queue', close: false };
-    else if (!drawer && (target.closest('.edge-right') || event.clientX > innerWidth - 30)) panelGesture.current = { x: event.clientX, y: event.clientY, from: 'library', close: false };
-    else return;
+    if (target.closest('.swipe-row,input,textarea,select,[contenteditable="true"],iframe')) return;
+    panelGesture.current = { id: event.pointerId, x: event.clientX, y: event.clientY, open: drawer, locked: false, done: false };
+  }
+
+  function movePanelSwipe(event: ReactPointerEvent<HTMLElement>) {
+    const gesture = panelGesture.current;
+    if (!gesture || gesture.id !== event.pointerId || gesture.done) return;
+    const dx = event.clientX - gesture.x, dy = event.clientY - gesture.y;
+    if (!gesture.locked) {
+      if (Math.abs(dy) > 10 && Math.abs(dy) >= Math.abs(dx)) { panelGesture.current = null; return; }
+      if (Math.abs(dx) < 10 || Math.abs(dx) < Math.abs(dy) * 1.3) return;
+      gesture.locked = true;
+      event.currentTarget.setPointerCapture(event.pointerId);
+    }
+    event.preventDefault();
+    const next = drawerSwipe(dx, dy, gesture.open);
+    if (next !== undefined) {
+      gesture.done = true;
+      panelClickUntil.current = performance.now() + 400;
+      setDrawer(next);
+    }
   }
 
   function finishPanelSwipe(event: ReactPointerEvent<HTMLElement>) {
+    movePanelSwipe(event);
     const gesture = panelGesture.current; panelGesture.current = null;
-    if (!gesture) return;
-    const dx = event.clientX - gesture.x, dy = event.clientY - gesture.y;
-    if (Math.abs(dx) < 45 || Math.abs(dx) < Math.abs(dy) * 1.25) return;
-    const opens = gesture.from === 'queue' ? dx > 0 : dx < 0;
-    if (gesture.close ? !opens : opens) setDrawer(gesture.close ? null : gesture.from);
+    if (gesture?.locked) { event.preventDefault(); panelClickUntil.current = performance.now() + 400; }
   }
 
   useEffect(() => {
@@ -1823,7 +1845,7 @@ export default function App() {
     observer.observe(libraryEnd.current);
     return () => observer.disconnect();
   }, [isMobile, drawer, librarySource, libraryMatches, libraryLimit]);
-  return <main onPointerDown={startPanelSwipe} onPointerUp={finishPanelSwipe} onPointerCancel={() => { panelGesture.current = null; }} className={`app ${telegramInitData ? 'telegram-app' : ''}`}><style>{STYLES}</style><div className="backdrop" aria-hidden="true"><div className="backdrop-art" style={{ '--party-image': `url("${partyImage}")` } as CSSProperties} /></div><div className="shell">
+  return <main onPointerDownCapture={startPanelSwipe} onPointerMove={movePanelSwipe} onPointerUp={finishPanelSwipe} onPointerCancel={() => { panelGesture.current = null; }} onClickCapture={(event) => { if (performance.now() < panelClickUntil.current) { event.preventDefault(); event.stopPropagation(); } }} className={`app ${telegramInitData ? 'telegram-app' : ''}`}><style>{STYLES}</style><div className="backdrop" aria-hidden="true"><div className="backdrop-art" style={{ '--party-image': `url("${partyImage}")` } as CSSProperties} /></div><div className="shell">
     <header className="topbar"><div className="brand"><span className="brandmark"><img src={brandLogo} width="54" height="54" alt="" /></span> PRADA SOUND</div>
       {me ? <span className="profile-chip"><Avatar profile={me} size={32} /><span>{profileLabel(me)}</span></span> :
         <span className="pill"><span className="dot" /> PRIVATE MUSIC ROOM</span>}</header>
@@ -1852,6 +1874,7 @@ export default function App() {
         <button className="button ghost" onClick={() => { setSession(null); setQueueItems([]); setTrackId(''); setError(''); }}>Выйти</button>
       </div></div>
       {isMobile && <><button className={`drawer-scrim ${drawer ? 'visible' : ''}`} aria-label="Закрыть панель" tabIndex={drawer ? 0 : -1} onClick={() => setDrawer(null)} />
+        {!drawer && <><div className="edge-swipe-zone edge-swipe-left" aria-hidden="true" /><div className="edge-swipe-zone edge-swipe-right" aria-hidden="true" /></>}
         <button className="edge-handle edge-left" aria-label="Открыть общую очередь" onClick={() => setDrawer('queue')}><span>Очередь</span><i>{queueItems.length}</i></button>
         <button className="edge-handle edge-right" aria-label="Открыть медиатеку" onClick={() => setDrawer('library')}><span>Медиатека</span><i>‹</i></button></>}
       <div className="dashboard"><div className="maincol">
@@ -2014,7 +2037,7 @@ export default function App() {
         <aside className={`drawer library-drawer ${drawer === 'library' ? 'is-open' : ''}`} inert={isMobile && drawer !== 'library'} aria-hidden={isMobile && drawer !== 'library'} role={isMobile ? 'dialog' : undefined} aria-modal={isMobile && drawer === 'library' ? true : undefined} aria-label="Ваша медиатека">
           <header className="drawer-header"><div><span className="eyebrow">МУЗЫКА, КОТОРАЯ ВАША</span><h2>Ваша медиатека</h2></div><button className="drawer-close mobile-only" aria-label="Закрыть панель" onClick={() => setDrawer(null)}>×</button></header>
           <div className="library-tabs" role="tablist" aria-label="Источник музыки">{(['yandex', 'spotify', 'soundcloud', 'youtube'] as LibrarySource[]).map((source) => <button key={source} role="tab" aria-selected={librarySource === source} className={librarySource === source ? 'active' : ''} onClick={() => selectLibrary(source)}><span className={`service-icon ${source}`}>{source === 'yandex' ? 'Я' : source === 'spotify' ? '◉' : source === 'soundcloud' ? '☁' : '▶'}</span><span>{source === 'yandex' ? 'Яндекс' : source === 'spotify' ? 'Spotify' : source === 'soundcloud' ? 'SoundCloud' : 'YouTube'}</span></button>)}</div>
-          <p className="mobile-only swipe-hint">Смахните трек вправо — он появится в общей очереди →</p>
+          <p className="mobile-only swipe-hint">← Смахните трек влево, чтобы добавить в очередь</p>
           {libraryScanning && <p className="library-progress" role="status"><span />{libraryQuery ? 'Поиск по всем лайкам' : 'Загружаем медиатеку'} · проверено {librarySource === 'yandex' ? yandexTracks.length : musicLibrary?.tracks.length || 0} треков</p>}
           {libraryScanError && <p className="notice" role="alert">{libraryScanError} <button className="button tiny" onClick={() => setLibrarySearchAttempt((value) => value + 1)}>Продолжить поиск</button></p>}
           <div className="drawer-body">
@@ -2041,7 +2064,7 @@ export default function App() {
             {status === 'closed' && <> <button className="button tiny" onClick={() => setAttempt((value) => value + 1)}>Подключиться снова</button></>}
           </p>}
           {yandexTracks.length > 0 && filteredYandexTracks.length === 0 && <p className="muted small">{libraryScanning ? 'Ищем в остальных лайках…' : 'Треки не найдены.'}</p>}
-          {filteredYandexTracks.length > 0 && <ul className="likes">{filteredYandexTracks.slice(0, libraryLimit).map((track) => <SwipeTrack key={track.id} onRight={status === 'connected' && track.playable ? () => enqueue(`yandex_${track.id}`, `${track.title} — ${track.artist}`) : undefined}>
+          {filteredYandexTracks.length > 0 && <ul className="likes">{filteredYandexTracks.slice(0, libraryLimit).map((track) => <SwipeTrack key={track.id} leftLabel="В очередь" leftDestructive={false} onRight={isMobile ? () => setDrawer(null) : undefined} rightLabel="Закрыть" onLeft={status === 'connected' && track.playable ? () => enqueue(`yandex_${track.id}`, `${track.title} — ${track.artist}`) : undefined}>
             <div className="trackmeta"><strong>{track.title}</strong><small>{track.artist}</small>{!track.playable && <small>{track.reason}</small>}</div>
             <button className="button tiny track-action" disabled={status !== 'connected' || !track.playable} onClick={() => enqueue(`yandex_${track.id}`, `${track.title} — ${track.artist}`)}>{track.playable ? '+ В очередь' : 'Недоступно'}</button>
           </SwipeTrack>)}</ul>}
@@ -2097,7 +2120,7 @@ export default function App() {
                 <span className="row" style={{ flexWrap: 'wrap' }}><button className="button tiny" disabled={musicBusy || musicCooldown > 0} onClick={restoreMusic}>Обновить библиотеку</button>
                 <button className="button tiny" disabled={musicBusy} onClick={() => void disconnectMusic()}>Отключить</button></span></div>
               <label className="field library-search">Поиск по всей медиатеке<input value={musicSearch} onChange={(event) => setMusicSearch(event.target.value)} placeholder="Название или исполнитель" aria-label={`Поиск ${MUSIC_LABELS[musicProvider]}`} /></label>
-              <ul className="likes">{filteredMusic.slice(0, libraryLimit).map((track, index) => <SwipeTrack key={`${track.id}:${index}`} onRight={status === 'connected' && !musicBusy && track.playable ? () => enqueueMusic(track) : undefined}><div className="trackmeta"><strong>{track.title}</strong><small>{track.artist || MUSIC_LABELS[musicProvider]}</small>
+              <ul className="likes">{filteredMusic.slice(0, libraryLimit).map((track, index) => <SwipeTrack key={`${track.id}:${index}`} leftLabel="В очередь" leftDestructive={false} onRight={isMobile ? () => setDrawer(null) : undefined} rightLabel="Закрыть" onLeft={status === 'connected' && !musicBusy && track.playable ? () => enqueueMusic(track) : undefined}><div className="trackmeta"><strong>{track.title}</strong><small>{track.artist || MUSIC_LABELS[musicProvider]}</small>
                 {track.canonical_url && <a className="music-source" href={track.canonical_url} target="_blank" rel="noopener noreferrer">{MUSIC_LABELS[musicProvider]} ↗</a>}
                 {!track.playable && <small>{track.reason || 'Полный трек недоступен'}</small>}</div>
                 <button className="button tiny track-action" disabled={status !== 'connected' || musicBusy || !track.playable} onClick={() => enqueueMusic(track)}>+ В очередь</button></SwipeTrack>)}</ul>
@@ -2110,8 +2133,8 @@ export default function App() {
           <form className="addform" onSubmit={(event) => { if (isMobile) event.preventDefault(); else void addTrack(event); }}><input aria-label="YouTube ссылка или Video ID" value={trackId} onChange={(event) => setTrackId(event.target.value)} required
             placeholder="Ссылка YouTube или Video ID" /><button className="button primary track-action" disabled={status !== 'connected' || !trackId.trim() || loadingMetadata}>{loadingMetadata ? 'Ищем название…' : '+ В очередь'}</button></form>
           <p className="muted small">Подойдут youtube.com/watch?v=…, youtu.be/… или 11-значный ID.</p>
-          {youtubeCandidate && <ul className="likes"><SwipeTrack onRight={status === 'connected' ? () => { if (enqueue(youtubeCandidate.id, `${youtubeCandidate.title} — ${youtubeCandidate.artist}`)) { setTrackId(''); setYoutubeCandidate(null); } } : undefined}><div className="trackmeta"><strong>{youtubeCandidate.title}</strong><small>{youtubeCandidate.artist}</small></div><span className="source-dot">YT</span></SwipeTrack></ul>}
-          <p className="mobile-only swipe-hint">Ссылка превратится в трек. Смахните его вправо, чтобы добавить.</p>
+          {youtubeCandidate && <ul className="likes"><SwipeTrack leftLabel="В очередь" leftDestructive={false} onRight={isMobile ? () => setDrawer(null) : undefined} rightLabel="Закрыть" onLeft={status === 'connected' ? () => { if (enqueue(youtubeCandidate.id, `${youtubeCandidate.title} — ${youtubeCandidate.artist}`)) { setTrackId(''); setYoutubeCandidate(null); } } : undefined}><div className="trackmeta"><strong>{youtubeCandidate.title}</strong><small>{youtubeCandidate.artist}</small></div><span className="source-dot">YT</span></SwipeTrack></ul>}
+          <p className="mobile-only swipe-hint">Ссылка превратится в трек. Смахните его влево, чтобы добавить.</p>
         </section>
 
           <button className="library-vk" onClick={() => selectLibrary('vk')}>VK Музыка · экспериментально ↗</button>
