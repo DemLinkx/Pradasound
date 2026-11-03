@@ -230,6 +230,7 @@ class Lobby:
     last_sync: float = 0
     relay_source: str | None = None
     relay_generation: int = 0
+    relay_active: bool = False
     relay_requests: set[str] = field(default_factory=set)
     relay_listeners: set[str] = field(default_factory=set)
 
@@ -240,6 +241,7 @@ LOBBIES: dict[str, Lobby] = {}
 def reset_relay(lobby: Lobby) -> None:
     lobby.relay_source = None
     lobby.relay_generation += 1
+    lobby.relay_active = False
     lobby.relay_listeners.clear()
 
 
@@ -388,6 +390,12 @@ class ConnectionManager:
 
     async def _broadcast(self, lobby_id: str) -> None:
         lobby = LOBBIES[lobby_id]
+        active = bool(lobby.relay_source and lobby.queue_items and
+                      lobby.queue_items[0].track_id.startswith("spotify_"))
+        if active != lobby.relay_active:
+            lobby.relay_active = active
+            lobby.relay_generation += 1
+            lobby.relay_listeners.clear()
         while lobby.connections:
             clients = list(lobby.connections.items())
             state: dict[str, object] = {

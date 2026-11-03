@@ -1048,7 +1048,7 @@ export default function App() {
       return;
     }
     const from = message.from;
-    if (message.type !== 'relay_signal' || message.generation !== relayRef.current.generation || typeof from !== 'string') return;
+    if (!isSpotify || status !== 'connected' || message.type !== 'relay_signal' || message.generation !== relayRef.current.generation || typeof from !== 'string') return;
     const sending = isRelaySource && relayRef.current.listeners.includes(from);
     if (!sending && (!relayReceiving || from !== relayRef.current.source_id)) return;
     try {

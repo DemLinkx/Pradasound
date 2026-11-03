@@ -113,6 +113,24 @@ def test_guest_source_requires_host_approval_and_only_leads_spotify():
         assert state(host)["relay"]["source_id"] is None
 
 
+def test_leaving_spotify_invalidates_old_signaling_without_changing_transmitter():
+    with party() as (_, room, host, guest, initial):
+        lobby = LOBBIES[room["lobby_id"]]
+        lobby.queue_items[0].track_id = "spotify_" + "a" * 22
+        host.send_json({"action": "add_track", "track_id": "dQw4w9WgXcQ"})
+        state(host)
+        state(guest)
+        host.send_json({"action": "relay_request"})
+        before = state(host)["relay"]
+        state(guest)
+        host.send_json({"action": "skip_track", "expected_revision": 0})
+        after = state(host)["relay"]
+        state(guest)
+        assert after["source_id"] == before["source_id"]
+        assert after["generation"] > before["generation"]
+        assert after["listeners"] == []
+
+
 def test_turn_credentials_are_short_lived_and_do_not_expose_shared_secret(monkeypatch):
     secret = "test-server-only-shared-secret"
     monkeypatch.setenv("RELAY_TURN_SECRET", secret)
