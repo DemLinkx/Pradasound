@@ -18,6 +18,36 @@ const listeningPosition = sourceFunction('listeningPosition');
 const playbackSnapshot = sourceFunction('playbackSnapshot');
 const drawerSwipe = sourceFunction('drawerSwipe');
 const playbackLength = sourceFunction('playbackLength');
+const tabCaptureOptions = sourceFunction('tabCaptureOptions');
+const captureAudioTrack = sourceFunction('captureAudioTrack');
+const spotifyPlayerMode = sourceFunction('spotifyPlayerMode');
+
+test('capture explicitly includes the calling tab and keeps its local audio audible', () => {
+  const options = tabCaptureOptions();
+  assert.equal(options.selfBrowserSurface, 'include');
+  assert.equal(options.preferCurrentTab, true);
+  assert.equal(options.video.displaySurface, 'browser');
+  assert.equal(options.audio.suppressLocalAudioPlayback, false);
+  assert.equal(options.systemAudio, 'exclude');
+});
+
+test('broadcast accepts live tab audio and rejects window capture or missing audio', () => {
+  const audio = { readyState: 'live' };
+  const stream = (surface, tracks) => ({ getVideoTracks: () => [{ getSettings: () => ({ displaySurface: surface }) }], getAudioTracks: () => tracks });
+  assert.equal(captureAudioTrack(stream('browser', [audio]), true), audio);
+  assert.throws(() => captureAudioTrack(stream('window', [audio]), true), /не окно/);
+  assert.throws(() => captureAudioTrack(stream('browser', []), true), /аудиодорожку/);
+  assert.throws(() => captureAudioTrack(stream('browser', [{ readyState: 'ended' }]), true), /аудиодорожку/);
+});
+
+test('guests wait for room audio instead of automatically opening a Spotify preview', () => {
+  assert.equal(spotifyPlayerMode('Member', false, false, false), 'waiting');
+  assert.equal(spotifyPlayerMode('Member', false, false, true), 'embed');
+  assert.equal(spotifyPlayerMode('Member', false, true, true), 'relay');
+  assert.equal(spotifyPlayerMode('Main', false, false, false), 'embed');
+  assert.equal(spotifyPlayerMode('Main', false, true, false), 'relay');
+  assert.equal(spotifyPlayerMode('Member', true, true, false), 'embed');
+});
 
 test('duration uses the shorter known source and caps every track at twelve minutes', () => {
   assert.equal(playbackLength(420, 180), 180);
@@ -133,7 +163,7 @@ function listenerHarness() {
     listenerError: { current: '' }, remoteRef: { current: snapshot }, currentItem: { id: snapshot.item_id },
     playbackRevision: 0, currentKey: 'track:0', listenerToken: 'private-listener', streamAttempt: 0,
     fallbackId: '', currentTrack: 'track', listenerApplied: { current: '' }, listenerTrack: { current: { key: '', count: 0, transport: -1, waiting: false } }, clockOffset: { current: 0 },
-    localPause: { current: false }, isSpotify: false, isApple: false, relayReceiving: false, isRelaySource: false, audioPlayers: [{ current: player }],
+    localPause: { current: false }, isSpotify: false, isApple: false, relayReceiving: false, spotifyWaiting: false, isRelaySource: false, audioPlayers: [{ current: player }],
     activeAudioRef: { current: 0 }, slotKeys: { current: ['track:0', ''] },
     HTMLMediaElement: { HAVE_METADATA: 1 }, listeningPosition,
     localPlayback: () => ({ position: player.currentTime, paused: player.paused }),
@@ -149,6 +179,8 @@ test('WebRTC listeners and the Spotify transmitter never seek a local provider p
   context.relayReceiving = true; sync(true);
   assert.equal(player.seeks, 0); assert.equal(player.plays, 0);
   context.relayReceiving = false; context.isRelaySource = true; context.isSpotify = true; sync(true);
+  assert.equal(player.seeks, 0); assert.equal(player.plays, 0);
+  context.isRelaySource = false; context.spotifyWaiting = true; sync(true);
   assert.equal(player.seeks, 0); assert.equal(player.plays, 0);
 });
 

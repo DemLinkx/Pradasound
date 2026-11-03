@@ -9,6 +9,26 @@ import party3 from './assets/party-3.jpg';
 type Session = { lobby_id: string; role: 'Main' | 'Member'; host_token?: string };
 type RelayState = { source_id: string | null; generation: number; requests: string[]; listeners: string[] };
 type RelayPeer = { pc: RTCPeerConnection; generation: number; candidates: RTCIceCandidateInit[]; chain: Promise<void> };
+function tabCaptureOptions() {
+  return { video: { frameRate: 1, displaySurface: 'browser' },
+    audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, suppressLocalAudioPlayback: false },
+    selfBrowserSurface: 'include', preferCurrentTab: true, systemAudio: 'exclude',
+    monitorTypeSurfaces: 'exclude', surfaceSwitching: 'exclude' } as const;
+}
+
+function captureAudioTrack(stream: MediaStream, broadcast: boolean) {
+  const surface = stream.getVideoTracks()[0]?.getSettings().displaySurface;
+  if (broadcast && surface && surface !== 'browser') throw new Error('Для трансляции выберите «Вкладка Chrome» → Prada Sound, а не окно. Откройте сайт обычной вкладкой Chrome/Edge.');
+  const audio = stream.getAudioTracks()[0];
+  if (!audio || audio.readyState === 'ended') throw new Error('Браузер не передал аудиодорожку. Выберите вкладку Prada Sound и включите «Поделиться аудио вкладки».');
+  return audio;
+}
+
+function spotifyPlayerMode(role: Session['role'] | undefined, source: boolean, relayAvailable: boolean, personal: boolean) {
+  if (source) return 'embed';
+  if (relayAvailable) return 'relay';
+  return role === 'Main' || personal ? 'embed' : 'waiting';
+}
 type LibrarySource = 'yandex' | 'spotify' | 'soundcloud' | 'youtube' | 'vk' | 'apple';
 const MAX_TRACK_SECONDS = 720;
 function playbackLength(native: number, catalog = 0) {
@@ -574,6 +594,7 @@ export default function App() {
   const [relayIceVersion, setRelayIceVersion] = useState(0);
   const [relayConnected, setRelayConnected] = useState(false);
   const [relayError, setRelayError] = useState('');
+  const [spotifyPersonal, setSpotifyPersonal] = useState(false);
   const relayApproved = useRef(false);
   const relayMessage = useRef<(message: Record<string, unknown>) => void>(() => {});
   const appleCommands = useRef<Promise<unknown>>(Promise.resolve());
@@ -585,7 +606,7 @@ export default function App() {
     captureProbeRun.current++;
     if (relayCapture.current) { relayCapture.current = null; sendRelay({ action: 'relay_stop' }); }
     captureProbeCleanup.current?.(); captureProbeCleanup.current = null;
-    setCaptureProbe((old) => ({ ...old, active: false, pending: false, level: 0 }));
+    setCaptureProbe((old) => ({ ...old, active: false, pending: false, level: 0, message: 'Захват остановлен.' }));
   }
 
   async function startCaptureProbe(broadcast = false) {
@@ -593,6 +614,7 @@ export default function App() {
       setCaptureProbe({ active: false, pending: false, level: 0, heard: false, message: 'Проверка требует Chrome или Edge на компьютере и HTTPS.' }); return;
     }
     stopCaptureProbe();
+    setRelayError('');
     const run = ++captureProbeRun.current;
     setCaptureProbe({ active: false, pending: true, level: 0, heard: false, message: 'Выберите вкладку с играющей музыкой и включите «Поделиться аудио вкладки».' });
     let stream: MediaStream | null = null;
@@ -605,10 +627,10 @@ export default function App() {
       if (context) void context.close().catch(() => {});
     };
     try {
-      stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 1 }, audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+      stream = await navigator.mediaDevices.getDisplayMedia(tabCaptureOptions());
       if (run !== captureProbeRun.current) { cleanup(); return; }
-      const audio = stream.getAudioTracks()[0];
-      if (!audio) throw new Error('Браузер не передал звук. Выберите именно вкладку и включите передачу её аудио.');
+      const audio = captureAudioTrack(stream, broadcast);
+      if (broadcast && socket.current?.readyState !== WebSocket.OPEN) throw new Error('Связь с комнатой прервалась. Дождитесь подключения и повторите захват.');
       context = new AudioContext();
       const source = context.createMediaStreamSource(new MediaStream([audio]));
       const analyser = context.createAnalyser(); analyser.fftSize = 1024;
@@ -636,12 +658,18 @@ export default function App() {
       if (!broadcast) expiry = setTimeout(finish, 30000);
     } catch (cause) {
       cleanup();
-      if (run === captureProbeRun.current) setCaptureProbe({ active: false, pending: false, level: 0, heard: false,
-        message: cause instanceof DOMException && cause.name === 'NotAllowedError' ? 'Захват отменён или запрещён браузером.' : cause instanceof Error ? cause.message : 'Не удалось проверить звук.' });
+      if (run === captureProbeRun.current) {
+        const message = cause instanceof DOMException && cause.name === 'NotAllowedError' ? 'Захват отменён или запрещён браузером.' : cause instanceof Error ? cause.message : 'Не удалось проверить звук.';
+        setCaptureProbe({ active: false, pending: false, level: 0, heard: false, message });
+        if (broadcast) setRelayError(message);
+      }
     }
   }
 
-  useEffect(() => () => { captureProbeRun.current++; captureProbeCleanup.current?.(); captureProbeCleanup.current = null; relayCapture.current = null; }, [session?.lobby_id]);
+  useEffect(() => {
+    setCaptureProbe({ active: false, pending: false, level: 0, heard: false, message: '' }); setSpotifyPersonal(false);
+    return () => { captureProbeRun.current++; captureProbeCleanup.current?.(); captureProbeCleanup.current = null; relayCapture.current = null; };
+  }, [session?.lobby_id]);
   const lastRoom = useRef('');
   const draggingItem = useRef('');
 
@@ -988,9 +1016,15 @@ export default function App() {
   const isApple = currentTrack?.startsWith('apple_') === true;
   const currentKey = `${playbackRevision}:${currentItem?.id}`;
   const isRelaySource = Boolean(connectionId && relay.source_id === connectionId);
+  const spotifyMode = spotifyPlayerMode(session?.role, isRelaySource, Boolean(relay.source_id), spotifyPersonal);
+  const spotifyEmbed = isSpotify && spotifyMode === 'embed';
+  const spotifyWaiting = isSpotify && spotifyMode === 'waiting';
+  const spotifyLeadsPlayback = session?.role === 'Main' || isRelaySource;
   const playbackDevice = session?.role === 'Main' || isRelaySource && isSpotify || Boolean(listenTogether && listenerToken && hostOnline && status === 'connected');
   const relayReceiving = Boolean(isSpotify && relay.source_id && !isRelaySource && playbackDevice);
   const renderPlayer = session?.role === 'Main' || listenTogether || isRelaySource && isSpotify;
+
+  useEffect(() => { if (spotifyWaiting) { setPlayingKey(''); setAudioError(''); } }, [spotifyWaiting, currentKey]);
 
   function sendRelay(message: Record<string, unknown>) {
     if (socket.current?.readyState === WebSocket.OPEN) socket.current.send(JSON.stringify(message));
@@ -1324,7 +1358,7 @@ export default function App() {
 
   useEffect(() => {
     setSpotifyReady(false);
-    if (!isSpotify || !playbackDevice || relayReceiving || !currentItem || !spotifyMount.current) return;
+    if (!spotifyEmbed || !playbackDevice || !currentItem || !spotifyMount.current) return;
     let active = true;
     let controller: SpotifyController | null = null;
     let progress: SpotifyProgress = { position: 0, duration: 0, started: false };
@@ -1343,7 +1377,7 @@ export default function App() {
         player.addListener('ready', () => {
           if (!active) return;
           setSpotifyReady(true);
-          if ((session?.role === 'Main' || isRelaySource) && volumeRef.current > 0) try { player.play(); } catch { setAudioError('Нажмите ▶ в плеере Spotify, чтобы начать.'); }
+          if (spotifyLeadsPlayback && volumeRef.current > 0) try { player.play(); } catch { setAudioError('Нажмите ▶ в плеере Spotify, чтобы начать.'); }
         });
         player.addListener('playback_update', ({ data }) => {
           if (!active || !data) return;
@@ -1377,7 +1411,7 @@ export default function App() {
       if (spotifyPlayer.current === controller) spotifyPlayer.current = null;
       mount.replaceChildren();
     };
-  }, [currentKey, session?.role, session?.lobby_id, streamAttempt, playbackDevice, relayReceiving, isRelaySource]);
+  }, [currentKey, session?.role, session?.lobby_id, streamAttempt, playbackDevice, spotifyEmbed, spotifyLeadsPlayback]);
 
   useEffect(() => {
     setAppleReady(false);
@@ -1525,7 +1559,7 @@ export default function App() {
   }, [currentKey, playbackDevice, playingKey, trackDurations, fallbackId, appleReady, session?.role, relayReceiving, isRelaySource]);
 
   function syncListener(force = false) {
-    if (relayReceiving || isRelaySource && isSpotify) return;
+    if (relayReceiving || spotifyWaiting || isRelaySource && isSpotify) return;
     if (session?.role !== 'Member' || !playbackDevice || !listenWanted.current || listenerError.current && !force) return;
     const snapshot = remoteRef.current;
     if (!snapshot || snapshot.item_id !== currentItem?.id || snapshot.revision !== playbackRevision) return;
@@ -2273,7 +2307,7 @@ export default function App() {
           <p className="muted small">{listenTogether ? status !== 'connected' ? 'Восстанавливаем соединение. Звук приостановлен.' : !hostOnline ? 'Ждём подключения хоста.' : listenPaused ? 'У вас пауза. Нажмите ▶, чтобы продолжить вместе с хостом.' : 'Общая песня, пауза и перемотка. Во время песни позиция не подстраивается — возможна небольшая задержка.' : 'Включите звук в своих наушниках, сохранив общую очередь.'}</p>
           {listenTogether && isSpotify && <p className="muted small">{relay.source_id ? 'Звук приходит от транслятора. Вход в Spotify на вашем устройстве не нужен.' : 'Для оригиналов нужен собственный доступ Spotify или транслятор с компьютера.'}</p>}
         </section>}
-        <section className="card cardpad"><details open={Boolean(relay.source_id || relay.requests.length || relayCapture.current)}><summary>Spotify · трансляция звука</summary>
+        <section className="card cardpad"><details open={Boolean(relay.source_id || relay.requests.length || relayCapture.current || captureProbe.pending || relayError)}><summary>Spotify · трансляция звука</summary>
           <p className="muted small">Один участник с Premium запускает оригиналы на компьютере. Остальные включают «Слушать вместе» и получают только звук, без входа в Spotify.</p>
           <p className="muted small">В Chrome/Edge выберите именно вкладку Prada Sound и включите передачу её аудио. Видео не отправляется. Spotify переключается по общей очереди; Яндекс и YouTube работают обычным способом.</p>
           <div className="row" style={{ flexWrap: 'wrap' }}>
@@ -2281,7 +2315,7 @@ export default function App() {
             {(relayCapture.current || relay.source_id && session.role === 'Main') && <button className="button tiny" onClick={() => relayCapture.current ? stopCaptureProbe() : sendRelay({ action: 'relay_stop' })}>Остановить трансляцию</button>}
           </div>
           {relay.source_id && <p className="muted small">{isRelaySource ? 'Вы — транслятор' : `Транслятор: ${profileLabel(profiles[members.find((member) => member.member_id === relay.source_id)?.owner_id || ''])}`} · {relay.listeners.length}/20 слушателей</p>}
-          {relayCapture.current && captureProbe.message && <p className="muted small" role="status">{captureProbe.message}</p>}
+          {captureProbe.message && !relayError && <p className="muted small" role="status">{captureProbe.message}</p>}
           {session.role === 'Main' && relay.requests.filter((id) => id !== relay.source_id).map((id) => <div className="sectionhead" key={id}><span>{profileLabel(profiles[members.find((member) => member.member_id === id)?.owner_id || ''])} готов передавать звук</span><button className="button tiny" onClick={() => sendRelay({ action: 'relay_grant', member_id: id })}>Разрешить трансляцию</button></div>)}
           {relayReceiving && <><p className="muted small" role="status">{relayConnected ? 'Аудиосоединение установлено' : 'Соединяем устройства…'}</p><button className="button tiny" onClick={reconnectRelay}>Переподключить звук</button></>}
           {relayError && <p className="notice" role="alert">{relayError}</p>}
@@ -2303,8 +2337,8 @@ export default function App() {
               {currentTrack ? <div className="bars" aria-hidden="true">{Array.from({ length: 20 }, (_, i) => <i key={i} />)}</div> :
                 <button className="button tiny stage-add" onClick={() => { selectLibrary('youtube'); if (isMobile) setDrawer('library'); else document.getElementById('add-track')?.scrollIntoView({ behavior: 'smooth', block: 'center' }); }}>Добавить трек ↓</button>}
             </div>
-            <div className="miniPlayer" style={isSpotify && !relayReceiving ? { minHeight: 352, aspectRatio: 'auto' } : undefined}>
-              {isSpotify && !relayReceiving ? <div ref={spotifyMount} style={{ width: '100%', minHeight: 352 }} /> : fallbackId === currentTrack && currentTrack ? <div key={currentKey} ref={ytMount} className="fallbackVideo" /> :
+            <div className="miniPlayer" style={spotifyEmbed ? { minHeight: 352, aspectRatio: 'auto' } : undefined}>
+              {spotifyEmbed ? <div ref={spotifyMount} style={{ width: '100%', minHeight: 352 }} /> : fallbackId === currentTrack && currentTrack ? <div key={currentKey} ref={ytMount} className="fallbackVideo" /> :
               <div className={`spectrum ${currentTrack && playingKey === currentKey ? '' : 'idle'}`} aria-label="Аудиовизуализатор">
                 {Array.from({ length: 17 }, (_, i) => <i key={i} style={{ '--n': i } as CSSProperties} />)}
               </div>}
@@ -2320,7 +2354,7 @@ export default function App() {
           </div>
           <div className="deck-controls">
             <button className="deck-play" aria-label={playingKey === currentKey ? 'Пауза' : 'Воспроизвести'}
-              disabled={!playbackDevice || !currentTrack || (relayReceiving ? !relayConnected : isApple ? !appleReady : isSpotify ? !spotifyReady : !audioUrl && fallbackId !== currentTrack)} onClick={togglePlayback}>
+              disabled={!playbackDevice || !currentTrack || spotifyWaiting || (relayReceiving ? !relayConnected : isApple ? !appleReady : isSpotify ? !spotifyReady : !audioUrl && fallbackId !== currentTrack)} onClick={togglePlayback}>
               {playingKey === currentKey && currentTrack ? <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="4" width="4" height="16" rx="1" /><rect x="14" y="4" width="4" height="16" rx="1" /></svg> :
                 <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 4.7a1 1 0 0 1 1.5-.86l11 7.3a1 1 0 0 1 0 1.72l-11 7.3A1 1 0 0 1 8 19.3z" /></svg>}
             </button>
@@ -2376,7 +2410,8 @@ export default function App() {
               }
             } }} />)}
           <div className="deck-message">{currentTrack ? <>
-            {isSpotify && <p className="muted small">{relayReceiving ? 'Оригинал Spotify: получаем звук от транслятора. Позиция показана приблизительно; аудио не перематывается для постоянной синхронизации.' : 'Воспроизведение оригинала через Spotify в этом браузере. Полный доступ может требовать входа в его плеере и Premium. Громкость регулируется в Spotify или на устройстве; переход к следующему треку — без мешапа.'}</p>}
+            {isSpotify && <p className="muted small">{spotifyWaiting ? 'Ждём трансляцию Spotify. Попросите участника с Premium запустить передачу звука вкладки. Личный плеер автоматически не включается.' : relayReceiving ? 'Оригинал Spotify: получаем звук от транслятора. Позиция показана приблизительно; аудио не перематывается для постоянной синхронизации.' : 'Воспроизведение оригинала через Spotify в этом браузере. Полный доступ может требовать входа в его плеере и Premium. Громкость регулируется в Spotify или на устройстве; переход к следующему треку — без мешапа.'}</p>}
+            {isSpotify && session.role === 'Member' && !isRelaySource && !relay.source_id && <button className="button tiny" onClick={() => { setAudioError(''); setSpotifyPersonal((value) => !value); }}>{spotifyPersonal ? 'Ждать трансляцию комнаты' : 'Слушать через мой Spotify'}</button>}
             {isSpotify && session.role === 'Main' && <><button className="button tiny" disabled={resolvingAlternative || status !== 'connected'} onClick={() => void useSpotifyAlternative()}>{resolvingAlternative ? 'Подбираем запись…' : 'Найти версию YouTube для комнаты'}</button><p className="muted small">Заменит источник текущего трека для всей комнаты. Эта запись может отличаться от Spotify.</p></>}
             {isApple && <><p className="muted small">Apple Music · экспериментально. Оригинал играет через MusicKit с вашим доступом на этом устройстве; вход автора трека другим участникам не передаётся.</p>{!appleAuthorized && <button className="button tiny" onClick={() => { selectLibrary('apple'); if (isMobile) setDrawer('library'); else document.getElementById('music-services')?.scrollIntoView({ behavior: 'smooth' }); }}>Подключить Apple Music</button>}</>}
             {fallbackId === currentTrack && <p className="muted small">Аудиопоток YouTube недоступен — пробуем встроенный плеер.</p>}
