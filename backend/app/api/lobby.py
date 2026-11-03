@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import hashlib
 import hmac
 import json
@@ -227,9 +228,31 @@ class Lobby:
     playback: dict[str, object] | None = None
     sync_serial: int = 0
     last_sync: float = 0
+    relay_source: str | None = None
+    relay_generation: int = 0
+    relay_requests: set[str] = field(default_factory=set)
+    relay_listeners: set[str] = field(default_factory=set)
 
 
 LOBBIES: dict[str, Lobby] = {}
+
+
+def reset_relay(lobby: Lobby) -> None:
+    lobby.relay_source = None
+    lobby.relay_generation += 1
+    lobby.relay_listeners.clear()
+
+
+def relay_ice(lobby_id: str, member_id: str) -> list[dict[str, object]]:
+    settings = Settings()
+    servers: list[dict[str, object]] = [{"urls": "stun:stun.cloudflare.com:3478"}]
+    if settings.relay_turn_secret and settings.relay_turn_urls:
+        username = f"{int(time()) + 3600}:{lobby_id}:{member_id}"
+        credential = base64.b64encode(hmac.new(settings.relay_turn_secret.encode(),
+                                               username.encode(), hashlib.sha1).digest()).decode()
+        servers.append({"urls": settings.relay_turn_urls, "username": username,
+                        "credential": credential})
+    return servers
 
 
 async def expire_empty(lobby_id: str, lobby: Lobby, stamp: float) -> None:
@@ -274,6 +297,7 @@ class ConnectionManager:
             lobby.member_owners.pop(previous_id, None)
             lobby.member_telegram.pop(previous_id, None)
             lobby.main_id = None
+            reset_relay(lobby)
             if previous is not None:
                 try:
                     await previous.close(code=1012, reason="main_reconnected")
@@ -290,7 +314,7 @@ class ConnectionManager:
         lobby.vacated = False
         if main:
             lobby.main_id = member_id
-        await self.send(ws, {"type": "identity", "owner_id": owner_id})
+        await self.send(ws, {"type": "identity", "owner_id": owner_id, "member_id": member_id})
         await self.broadcast(lobby_id)
         return member_id
 
@@ -299,6 +323,10 @@ class ConnectionManager:
         lobby.connections.pop(member_id, None)
         lobby.member_owners.pop(member_id, None)
         lobby.member_telegram.pop(member_id, None)
+        lobby.relay_requests.discard(member_id)
+        lobby.relay_listeners.discard(member_id)
+        if member_id in (lobby.relay_source, lobby.main_id):
+            reset_relay(lobby)
         for token, member in list(lobby.listener_tokens.items()):
             if member == member_id:
                 del lobby.listener_tokens[token]
@@ -348,6 +376,8 @@ class ConnectionManager:
             return
         targets = [(mid, lobby.connections[mid]) for mid in set(lobby.listener_tokens.values())
                    if mid in lobby.connections]
+        if lobby.relay_source and lobby.relay_source != lobby.main_id and lobby.main_id:
+            targets.append((lobby.main_id, lobby.connections[lobby.main_id]))
         sent = await asyncio.gather(*(self.send(ws, {"type": "playback_sync", **state})
                                       for _, ws in targets))
         for (mid, _), success in zip(targets, sent):
@@ -378,6 +408,9 @@ class ConnectionManager:
                 "queue_revision": lobby.queue_revision,
                 "profiles": dict(lobby.profiles),
                 "main_profile": lobby.profiles.get(lobby.owner_ids.get(lobby.host_token, "")),
+                "relay": {"source_id": lobby.relay_source, "generation": lobby.relay_generation,
+                          "requests": sorted(lobby.relay_requests),
+                          "listeners": sorted(lobby.relay_listeners)},
                 "members": [
                     {
                         "member_id": member_id,
@@ -519,6 +552,7 @@ async def lobby_ws(ws: WebSocket, lobby_id: str) -> None:
             await manager.send(ws, {"type": "host_granted", "host_token": lobby.host_token})
     if member_id is None:
         return
+    relay_window, relay_messages = monotonic(), 0
     try:
         while True:
             incoming = await ws.receive()
@@ -537,6 +571,100 @@ async def lobby_ws(ws: WebSocket, lobby_id: str) -> None:
                 continue
             if not isinstance(message, dict):
                 await manager.send(ws, {"type": "error", "error": "invalid_message"})
+                continue
+            action = message.get("action")
+            if isinstance(action, str) and action.startswith("relay_"):
+                now = monotonic()
+                if now - relay_window >= 10:
+                    relay_window, relay_messages = now, 0
+                relay_messages += 1
+                if relay_messages > 240:
+                    await manager.send(ws, {"type": "error", "error": "Слишком много команд трансляции"})
+                    continue
+                if action == "relay_request":
+                    lobby.relay_requests.add(member_id)
+                    if member_id == lobby.main_id:
+                        reset_relay(lobby)
+                        lobby.relay_source = member_id
+                        lobby.relay_requests.discard(member_id)
+                elif action == "relay_grant":
+                    target = message.get("member_id")
+                    if (member_id != lobby.main_id or not isinstance(target, str) or
+                            target not in lobby.relay_requests or target not in lobby.connections):
+                        await manager.send(ws, {"type": "error", "error": "Транслятора назначает хост"})
+                        continue
+                    reset_relay(lobby)
+                    lobby.relay_source = target
+                    lobby.relay_requests.discard(target)
+                    lobby.playback = None
+                elif action == "relay_stop":
+                    lobby.relay_requests.discard(member_id)
+                    if member_id in (lobby.main_id, lobby.relay_source):
+                        reset_relay(lobby)
+                elif action == "relay_join":
+                    allowed = member_id == lobby.main_id or member_id in lobby.listener_tokens.values()
+                    if (not allowed or not lobby.relay_source or member_id == lobby.relay_source or
+                            not lobby.queue_items or not lobby.queue_items[0].track_id.startswith("spotify_")):
+                        await manager.send(ws, {"type": "error", "error": "Включите «Слушать вместе» для трансляции"})
+                        continue
+                    if member_id not in lobby.relay_listeners and len(lobby.relay_listeners) >= 20:
+                        await manager.send(ws, {"type": "error", "error": "В трансляции уже 20 слушателей"})
+                        continue
+                    lobby.relay_listeners.add(member_id)
+                    await manager.send(ws, {"type": "relay_access", "generation": lobby.relay_generation,
+                                            "ice_servers": relay_ice(lobby_id, member_id)})
+                    await manager.send(lobby.connections[lobby.relay_source], {
+                        "type": "relay_access", "generation": lobby.relay_generation,
+                        "ice_servers": relay_ice(lobby_id, lobby.relay_source)})
+                elif action == "relay_leave":
+                    lobby.relay_listeners.discard(member_id)
+                elif action == "relay_signal":
+                    target = message.get("target")
+                    kind, data = message.get("kind"), message.get("data")
+                    source = lobby.relay_source
+                    sending = member_id == source and target in lobby.relay_listeners if isinstance(target, str) else False
+                    receiving = target == source and member_id in lobby.relay_listeners
+                    if (type(message.get("generation")) is not int or
+                            message["generation"] != lobby.relay_generation or not source or
+                            not isinstance(target, str) or target not in lobby.connections or
+                            not (sending or receiving) or kind not in ("offer", "answer", "ice") or
+                            kind == "offer" and not sending or kind == "answer" and not receiving):
+                        await manager.send(ws, {"type": "error", "error": "Недействительное соединение трансляции"})
+                        continue
+                    if kind in ("offer", "answer"):
+                        if (not isinstance(data, str) or len(data) > 12000 or
+                                "m=audio " not in data or re.search(r"(?:^|\n)m=(?!audio )", data)):
+                            await manager.send(ws, {"type": "error", "error": "Разрешена только аудиотрансляция"})
+                            continue
+                    elif (not isinstance(data, dict) or not isinstance(data.get("candidate"), str) or
+                          len(data["candidate"]) > 2048 or data.get("sdpMLineIndex") not in (0, None) or
+                          data.get("sdpMid") is not None and
+                          (not isinstance(data["sdpMid"], str) or len(data["sdpMid"]) > 32)):
+                        await manager.send(ws, {"type": "error", "error": "Некорректный ICE-кандидат"})
+                        continue
+                    await manager.send(lobby.connections[target], {"type": "relay_signal", "from": member_id,
+                        "generation": lobby.relay_generation, "kind": kind, "data": data})
+                    continue
+                elif action == "relay_control":
+                    source = lobby.relay_source
+                    if (member_id != lobby.main_id or not source or source == member_id or
+                            message.get("expected_revision") != lobby.playback_revision or
+                            not lobby.queue_items or message.get("item_id") != lobby.queue_items[0].id or
+                            not lobby.queue_items[0].track_id.startswith("spotify_") or
+                            message.get("command") not in ("play", "pause", "seek")):
+                        await manager.send(ws, {"type": "error", "error": "Управление доступно только хосту"})
+                        continue
+                    position = message.get("position", 0)
+                    if type(position) not in (int, float) or not 0 <= position <= MAX_TRACK_SECONDS:
+                        continue
+                    await manager.send(lobby.connections[source], {"type": "relay_control",
+                        "item_id": message["item_id"], "revision": lobby.playback_revision,
+                        "command": message["command"], "position": position})
+                    continue
+                else:
+                    await manager.send(ws, {"type": "error", "error": "Неизвестная команда трансляции"})
+                    continue
+                await manager.broadcast(lobby_id)
                 continue
             if message.get("action") == "transfer_host":
                 target_id = message.get("member_id")
@@ -558,6 +686,7 @@ async def lobby_ws(ws: WebSocket, lobby_id: str) -> None:
                     await manager.send(ws, {"type": "error", "error": "host_transfer_failed"})
                     continue
                 lobby.owner_ids.pop(old_token, None)
+                reset_relay(lobby)
                 await manager.send(ws, {"type": "host_revoked"})
                 await manager.broadcast(lobby_id)
                 continue
@@ -572,10 +701,14 @@ async def lobby_ws(ws: WebSocket, lobby_id: str) -> None:
                 token = secrets.token_urlsafe(32) if enabled else ""
                 if enabled:
                     lobby.listener_tokens[token] = member_id
+                else:
+                    lobby.relay_listeners.discard(member_id)
                 await manager.send(ws, {"type": "listener_access", "enabled": enabled,
                                        "token": token, "server_time": time() * 1000,
                                        "host_online": lobby.main_id is not None,
                                        "playback": playback_snapshot(lobby)})
+                if lobby.relay_source:
+                    await manager.broadcast(lobby_id)
                 continue
             elif message.get("action") == "playback_ping":
                 stamp = message.get("client_time")
@@ -584,7 +717,12 @@ async def lobby_ws(ws: WebSocket, lobby_id: str) -> None:
                                            "server_time": time() * 1000})
                 continue
             elif message.get("action") == "playback_sync":
-                if member_id != lobby.main_id:
+                spotify_relay = bool(lobby.relay_source and lobby.queue_items and
+                                     lobby.queue_items[0].track_id.startswith("spotify_"))
+                leader = lobby.relay_source if spotify_relay else lobby.main_id
+                if member_id != leader:
+                    if member_id == lobby.main_id and spotify_relay:
+                        continue
                     await manager.send(ws, {"type": "error", "error": "main_only"})
                     continue
                 position, duration = message.get("position"), message.get("duration", 0)
@@ -718,7 +856,11 @@ async def lobby_ws(ws: WebSocket, lobby_id: str) -> None:
                 if not changed:
                     continue
             elif message.get("action") == "skip_track":
-                if member_id != lobby.main_id:
+                source_ended = (member_id == lobby.relay_source and lobby.queue_items and
+                                lobby.queue_items[0].track_id.startswith("spotify_") and
+                                message.get("ended") is True and
+                                message.get("item_id") == lobby.queue_items[0].id)
+                if member_id != lobby.main_id and not source_ended:
                     await manager.send(ws, {"type": "error", "error": "main_only"})
                     continue
                 if type(message.get("expected_revision")) is not int or (

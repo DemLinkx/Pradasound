@@ -133,7 +133,7 @@ function listenerHarness() {
     listenerError: { current: '' }, remoteRef: { current: snapshot }, currentItem: { id: snapshot.item_id },
     playbackRevision: 0, currentKey: 'track:0', listenerToken: 'private-listener', streamAttempt: 0,
     fallbackId: '', currentTrack: 'track', listenerApplied: { current: '' }, listenerTrack: { current: { key: '', count: 0, transport: -1, waiting: false } }, clockOffset: { current: 0 },
-    localPause: { current: false }, isSpotify: false, isApple: false, audioPlayers: [{ current: player }],
+    localPause: { current: false }, isSpotify: false, isApple: false, relayReceiving: false, isRelaySource: false, audioPlayers: [{ current: player }],
     activeAudioRef: { current: 0 }, slotKeys: { current: ['track:0', ''] },
     HTMLMediaElement: { HAVE_METADATA: 1 }, listeningPosition,
     localPlayback: () => ({ position: player.currentTime, paused: player.paused }),
@@ -143,6 +143,14 @@ function listenerHarness() {
   const sync = new Script(`${stripTypeScriptTypes(source.slice(start, end))}; syncListener`).runInNewContext(context);
   return { player, snapshot, context, sync };
 }
+
+test('WebRTC listeners and the Spotify transmitter never seek a local provider player', () => {
+  const { player, context, sync } = listenerHarness();
+  context.relayReceiving = true; sync(true);
+  assert.equal(player.seeks, 0); assert.equal(player.plays, 0);
+  context.relayReceiving = false; context.isRelaySource = true; context.isSpotify = true; sync(true);
+  assert.equal(player.seeks, 0); assert.equal(player.plays, 0);
+});
 
 test('guest starts once and ignores heartbeat drift without changing tempo', () => {
   const { player, snapshot, sync } = listenerHarness();

@@ -36,3 +36,5 @@ class Settings(BaseSettings):
     telegram_mini_app_url: str = ""
     telegram_proxy_url: str = ""
     telegram_polling_enabled: bool = False
+    relay_turn_urls: list[str] = []
+    relay_turn_secret: str = ""
