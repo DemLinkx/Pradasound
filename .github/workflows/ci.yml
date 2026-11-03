@@ -47,6 +47,7 @@ jobs:
       - name: Validate Compose and build both images
         run: |
           docker compose --env-file .env.example config --quiet
+          docker compose --env-file .env.example --profile relay config --quiet
           docker compose --env-file .env.example build --pull
       - name: Start containers and test HTTP and WebSockets
         run: |
