@@ -26,7 +26,7 @@ from fastapi import APIRouter, Header, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, SecretStr
 
-from app.settings import Settings
+from app.settings import MAX_TRACK_SECONDS, Settings
 
 router = APIRouter(prefix="/api/music", tags=["music"])
 settings = Settings()
@@ -247,7 +247,7 @@ def _safe_id(value: object) -> str:
 
 
 def _provider(provider: str) -> None:
-    if provider not in {"spotify", "soundcloud", "vk"}:
+    if provider not in {"spotify", "soundcloud", "vk", "apple"}:
         raise HTTPException(404, "Неизвестный провайдер")
 
 
@@ -747,6 +747,8 @@ def _store(
 
 
 def _track(provider: str, raw: dict[str, Any]) -> dict[str, object] | None:
+    raw_duration = raw.get("duration_ms") if provider == "spotify" else raw.get("duration")
+    duration_ms = raw_duration * (1000 if provider == "vk" else 1) if type(raw_duration) is int else 0
     if provider == "spotify":
         identifier = raw.get("id")
         artists = raw.get("artists") or []
@@ -797,6 +799,8 @@ def _track(provider: str, raw: dict[str, Any]) -> dict[str, object] | None:
         return None
     if provider == "soundcloud" and not _safe_provider_url(canonical, "soundcloud"):
         return None
+    if duration_ms > MAX_TRACK_SECONDS * 1000:
+        playable, reason = False, "Трек длиннее 12 минут"
     return {
         "id": identifier,
         "title": title[:200],
@@ -804,11 +808,7 @@ def _track(provider: str, raw: dict[str, Any]) -> dict[str, object] | None:
         "canonical_url": canonical,
         "playable": playable,
         "reason": reason,
-        **(
-            {"duration_ms": raw["duration_ms"]}
-            if provider == "spotify" and type(raw.get("duration_ms")) is int
-            else {}
-        ),
+        **({"duration_ms": duration_ms} if duration_ms > 0 else {}),
     }
 
 
@@ -913,6 +913,8 @@ def validate_track(provider: str, handle: str, track_id: str) -> dict[str, objec
     item = session.imported.get(track_id)
     if item is None or not item["playable"]:
         raise HTTPException(403, "Трек не импортирован или недоступен")
+    if int(item.get("duration_ms") or 0) > MAX_TRACK_SECONDS * 1000:
+        raise HTTPException(422, "Трек длиннее 12 минут")
     return item.copy()
 
 
@@ -953,6 +955,14 @@ async def providers() -> dict[str, Any]:
             result[provider]["reason"] = (
                 "Экспериментальный вход через Kate Mobile; доступ к аудио проверяется после входа"
             )
+    result["apple"] = {
+        "oauth": False, "public_import": False, "musickit": True,
+        "configured": bool(_value("apple_music_developer_token")),
+        "native_library": True, "experimental": True,
+        "reason": "Экспериментальный вход Apple Music через MusicKit" if
+        _value("apple_music_developer_token") else
+        "Экспериментальный вход Apple Music пока не настроен",
+    }
     return {"providers": result}
 
 
@@ -1164,6 +1174,81 @@ async def poll_device(provider: str, login_id: str, request: Request) -> dict[st
         return {"status": "authorized", **library}
 
 
+def _apple_developer_token() -> str:
+    token = str(_value("apple_music_developer_token") or "").strip()
+    if not token:
+        raise HTTPException(503, "Экспериментальный вход Apple Music ещё не настроен")
+    return token
+
+
+@router.get("/apple/config")
+async def apple_config(request: Request) -> dict[str, object]:
+    _check_origin(request)
+    return {"developer_token": _apple_developer_token(), "experimental": True}
+
+
+async def _apple_page(session: MusicSession, handle: str, cursor: str = "") -> dict[str, Any]:
+    try:
+        offset = int(cursor or "0")
+    except ValueError:
+        raise HTTPException(400, "Некорректная страница") from None
+    if offset < 0 or offset >= MAX_LIBRARY_TRACKS or str(offset) != (cursor or "0"):
+        raise HTTPException(400, "Некорректная страница")
+    async with session.lock, _client() as client:
+        body = await _call(client, "GET", "https://api.music.apple.com/v1/me/library/songs",
+                           headers={"Authorization": f"Bearer {_apple_developer_token()}",
+                                    "Music-User-Token": session.access_token},
+                           params={"limit": PAGE_SIZE, "offset": offset})
+    rows = body.get("data")
+    if not isinstance(rows, list):
+        raise HTTPException(502, "Apple Music вернул некорректную медиатеку")
+    tracks = []
+    for row in rows[:PAGE_SIZE]:
+        if not isinstance(row, dict) or not isinstance(row.get("attributes"), dict):
+            continue
+        attrs = row["attributes"]
+        params = attrs.get("playParams") or {}
+        catalog_id = str(params.get("catalogId") or "") if isinstance(params, dict) else ""
+        identifier = catalog_id or str(row.get("id") or "")
+        if not ID_RE.fullmatch(identifier):
+            continue
+        duration = attrs.get("durationInMillis")
+        duration = duration if type(duration) is int and duration > 0 else 0
+        too_long = duration > MAX_TRACK_SECONDS * 1000
+        playable = bool(re.fullmatch(r"[0-9]{1,20}", catalog_id)) and not too_long
+        item = {"id": identifier, "title": str(attrs.get("name") or "Без названия")[:200],
+                "artist": str(attrs.get("artistName") or "Apple Music")[:200],
+                "canonical_url": f"https://music.apple.com/song/{catalog_id}" if playable else "",
+                "duration_ms": duration, "playable": playable,
+                "reason": "Трек длиннее 12 минут" if too_long else "" if playable else
+                "Для этой записи нет доступного оригинала в каталоге Apple Music"}
+        session.imported[identifier] = item
+        tracks.append(item)
+    next_offset = offset + len(rows)
+    more = bool(body.get("next")) and next_offset < MAX_LIBRARY_TRACKS
+    if more and not rows:
+        raise HTTPException(502, "Apple Music повторил пустую страницу")
+    return {"session": handle, "authenticated": True, "tracks": tracks,
+            "next_cursor": str(next_offset) if more else None, "has_more": more,
+            "import_notice": "Экспериментально: медиатека Apple Music. Для оригиналов нужен "
+            "собственный доступ к Apple Music на устройстве воспроизведения."}
+
+
+@router.post("/apple/login")
+async def apple_login(body: TokenBody, request: Request) -> dict[str, Any]:
+    _check_origin(request)
+    _apple_developer_token()
+    token = body.token.get_secret_value().strip()
+    if not token or len(token) > 8192 or "\n" in token or "\r" in token:
+        raise HTTPException(400, "Некорректное подтверждение Apple Music")
+    handle = _store("apple", token, expires_in=SESSION_TTL)
+    try:
+        return await _apple_page(SESSIONS[handle], handle)
+    except Exception:
+        SESSIONS.pop(handle, None)
+        raise
+
+
 @router.post("/vk/login")
 async def vk_login(body: TokenBody, request: Request) -> dict[str, Any]:
     _check_origin(request)
@@ -1339,6 +1424,8 @@ async def tracks(
 ) -> dict[str, Any]:
     _provider(provider)
     session = _session(x_music_session, provider)
+    if provider == "apple":
+        return await _apple_page(session, x_music_session, cursor)
     if provider == "spotify" and session.public_url:
         return _spotify_public_page(session, x_music_session, cursor)
     if provider == "spotify" and session.client_id and os.environ.get("SPOTIFY_NATIVE_HELPER"):
@@ -1538,6 +1625,11 @@ async def public_import(provider: str, body: PublicBody, request: Request) -> di
             "playable": True,
             "reason": "",
         }
+        duration = raw.get("duration")
+        if type(duration) in (int, float) and math.isfinite(duration) and duration > 0:
+            item["duration_ms"] = int(duration * 1000)
+            if duration > MAX_TRACK_SECONDS:
+                item["playable"], item["reason"] = False, "Трек длиннее 12 минут"
         session.imported[identifier] = item
         imported.append(item)
     next_offset = offset + PAGE_SIZE
@@ -1565,14 +1657,31 @@ async def spotify_resolve(body: ResolveBody, request: Request) -> dict[str, Any]
         if now - session.last_resolve < 6:
             raise HTTPException(429, "Подождите перед следующим поиском")
         session.last_resolve = now
-    query = f"ytsearch1:{item['artist']} {item['title']} audio"
+    query = f"ytsearch5:{item['artist']} {item['title']} audio"
     async with _extract_limit:
         try:
             info = await asyncio.wait_for(asyncio.to_thread(_extract, query, flat=True), timeout=20)
         except (TimeoutError, Exception):
             raise HTTPException(502, "Не удалось найти трек на YouTube") from None
     entries = info.get("entries") or []
-    first = entries[0] if isinstance(entries, list) and entries else None
+    candidates = [entry for entry in entries if isinstance(entry, dict)
+                  and not entry.get("is_live") and
+                  not (type(entry.get("duration")) in (int, float) and
+                       entry["duration"] > MAX_TRACK_SECONDS)] if isinstance(entries, list) else []
+    title_words = set(re.findall(r"\w+", str(item["title"]).casefold()))
+    artist_words = set(re.findall(r"\w+", str(item["artist"]).casefold()))
+    expected = int(item.get("duration_ms") or 0) / 1000
+
+    def score(entry: dict[str, Any]) -> float:
+        words = set(re.findall(r"\w+", str(entry.get("title") or "").casefold()))
+        match = 3 * len(words & title_words) / max(1, len(title_words))
+        match += len(words & artist_words) / max(1, len(artist_words))
+        duration = entry.get("duration")
+        if expected and type(duration) in (int, float):
+            match -= min(5, abs(duration - expected) / max(15, expected * .15))
+        return match
+
+    first = max(candidates, key=score) if candidates else None
     track_id = first.get("id") if isinstance(first, dict) else None
     if not isinstance(track_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{11}", track_id):
         raise HTTPException(404, "Подходящая запись на YouTube не найдена")
@@ -1589,6 +1698,41 @@ async def spotify_resolve(body: ResolveBody, request: Request) -> dict[str, Any]
     return result.copy()
 
 
+@router.post("/queue/{lobby_id}/{item_id}/youtube")
+async def spotify_queue_alternative(
+    lobby_id: str, item_id: str, request: Request, x_host_token: str = Header(default="")
+) -> dict[str, Any]:
+    from app.api.lobby import LOBBIES, manager
+
+    _check_origin(request)
+    lobby = LOBBIES.get(lobby_id)
+    if not lobby or not x_host_token or not hmac.compare_digest(x_host_token, lobby.host_token):
+        raise HTTPException(403, "Только хост может сменить источник воспроизведения")
+    item = lobby.queue_items[0] if lobby.queue_items else None
+    if not item or item.id != item_id or not item.track_id.startswith("spotify_") or not item.provider_session:
+        raise HTTPException(409, "Текущий трек Spotify уже изменился")
+    old_track = item.track_id
+    old_revision = lobby.playback_revision
+    resolved = await spotify_resolve(ResolveBody(session=item.provider_session,
+                                                track_id=old_track[8:]), request)
+    if (LOBBIES.get(lobby_id) is not lobby or not lobby.queue_items or
+            lobby.queue_items[0] is not item or lobby.playback_revision != old_revision or
+            not hmac.compare_digest(x_host_token, lobby.host_token)):
+        raise HTTPException(409, "Очередь изменилась во время поиска")
+    item.track_id = resolved["track_id"]
+    item.provider_session = None
+    item.canonical_url = resolved["canonical_url"]
+    item.duration_ms = 0
+    item.access_revision += 1
+    lobby.track_titles[item.track_id] = resolved["title"][:200]
+    if not any(entry.track_id == old_track for entry in lobby.queue_items):
+        lobby.track_titles.pop(old_track, None)
+    lobby.playback_revision += 1
+    lobby.queue_revision += 1
+    await manager.broadcast(lobby_id)
+    return {"matched_title": resolved["matched_title"], "provider": "youtube"}
+
+
 def _queue_item(lobby_id: str, item_id: str, host_token: str) -> tuple[str, str, str]:
     from app.api.lobby import LOBBIES  # Local import avoids a router cycle.
 
@@ -1598,13 +1742,13 @@ def _queue_item(lobby_id: str, item_id: str, host_token: str) -> tuple[str, str,
     if not host_token or not hmac.compare_digest(host_token, lobby.host_token):
         raise HTTPException(403, "Только Main может получить аудио")
     item = next((i for i in lobby.queue_items if i.id == item_id), None)
-    if item is None or not item.track_id.startswith(("sc_", "vk_")):
+    if item is None or not item.track_id.startswith(("sc_", "vk_", "apple_")):
         raise HTTPException(404, "Трек не найден в очереди")
     handle = getattr(item, "provider_session", None)
     if not isinstance(handle, str):
         raise HTTPException(403, "Автору трека нужно подключиться снова")
-    provider = "soundcloud" if item.track_id.startswith("sc_") else "vk"
-    raw_id = item.track_id[3:]
+    provider = "apple" if item.track_id.startswith("apple_") else "soundcloud" if item.track_id.startswith("sc_") else "vk"
+    raw_id = item.track_id.split("_", 1)[1]
     return provider, handle, raw_id
 
 
@@ -1624,6 +1768,8 @@ async def queue_stream(
     provider, handle, raw_id = _queue_item(lobby_id, item_id, x_host_token)
     session = _session(handle, provider)
     metadata = validate_track(provider, handle, raw_id)
+    if provider == "apple":
+        raise HTTPException(422, "Apple Music воспроизводится через личный MusicKit-плеер")
     if provider == "vk":
         await _refresh(session)
         async with _client() as client:

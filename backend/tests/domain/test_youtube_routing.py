@@ -3,10 +3,48 @@ import importlib
 import time
 
 import httpx
+import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from yt_dlp.utils import DownloadError
 
 main = importlib.import_module("app.main")
+
+
+def test_long_youtube_extract_is_rejected_before_audio_download(monkeypatch):
+    class Video:
+        def __init__(self, options):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def extract_info(self, url, download):
+            assert download is False
+            return {"duration": 900, "is_live": False}
+
+    monkeypatch.setattr(main, "YoutubeDL", Video)
+    monkeypatch.setattr(main, "YOUTUBE_DURATION_CACHE", {})
+    with pytest.raises(HTTPException) as error:
+        main.extract_youtube_audio("dQw4w9WgXcQ")
+    assert error.value.status_code == 422
+    assert main.YOUTUBE_DURATION_CACHE["dQw4w9WgXcQ"] == 900
+
+
+def test_audio_descriptor_retains_duration_after_metadata_cache_eviction(monkeypatch):
+    from app.api.lobby import Lobby
+
+    monkeypatch.setattr(main.settings, "youtube_audio_enabled", True)
+    monkeypatch.setitem(main.LOBBIES, "duration-test", Lobby(host_token="host"))
+    source = main.YouTubeAudio("https://audio.googlevideo.com/audio", time.time() + 300,
+                              None, duration=180)
+    monkeypatch.setattr(main, "YOUTUBE_AUDIO_CACHE", {"dQw4w9WgXcQ": source})
+    monkeypatch.setattr(main, "YOUTUBE_DURATION_CACHE", {})
+    result = asyncio.run(main.prepare_youtube_audio("dQw4w9WgXcQ", "duration-test", "host"))
+    assert result["duration"] == 180 and result["max_duration"] == 720
 
 
 def test_audio_falls_back_and_keeps_the_successful_proxy(monkeypatch):

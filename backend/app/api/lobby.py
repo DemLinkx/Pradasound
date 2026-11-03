@@ -7,14 +7,14 @@ import re
 import secrets
 from dataclasses import dataclass, field
 from time import monotonic, time
-from urllib.parse import parse_qsl, urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse
 from uuid import uuid4
 
 import httpx
 from fastapi import APIRouter, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
-from app.settings import Settings
+from app.settings import MAX_TRACK_SECONDS, Settings
 
 router = APIRouter(prefix="/api/lobby", tags=["lobby"])
 origins = Settings().cors_origins
@@ -23,6 +23,13 @@ telegram_webhook_secret = Settings().telegram_webhook_secret
 telegram_mini_app_url = Settings().telegram_mini_app_url
 telegram_proxy_url = Settings().telegram_proxy_url
 TELEGRAM_STATUS: dict[str, object] = {"connected": False, "polls": 0}
+
+
+@router.get("/config")
+async def public_config() -> dict[str, object]:
+    username = Settings().telegram_bot_username.lstrip("@")
+    return {"telegram_bot_username": username if re.fullmatch(r"[A-Za-z0-9_]{5,32}", username) else "",
+            "max_track_seconds": MAX_TRACK_SECONDS}
 
 
 @router.post("/telegram/webhook")
@@ -56,6 +63,13 @@ def telegram_reply(update: object) -> dict[str, object]:
             or type(chat.get("id")) is not int or not isinstance(text, str)
             or text.partition(" ")[0] not in ("/start", "/help")):
         return {}
+    app_url = telegram_mini_app_url
+    payload = text.partition(" ")[2].strip()
+    if re.fullmatch(r"l_[a-f0-9]{32}", payload):
+        parsed = urlparse(app_url)
+        query = dict(parse_qsl(parsed.query))
+        query["lobby"] = payload[2:]
+        app_url = parsed._replace(query=urlencode(query)).geturl()
     return {
         "method": "sendMessage",
         "chat_id": chat["id"],
@@ -65,7 +79,7 @@ def telegram_reply(update: object) -> dict[str, object]:
         ),
         "reply_markup": {"inline_keyboard": [[{
             "text": "Открыть Prada Sound",
-            "web_app": {"url": telegram_mini_app_url},
+            "web_app": {"url": app_url},
         }]]},
     }
 
@@ -602,7 +616,7 @@ async def lobby_ws(ws: WebSocket, lobby_id: str) -> None:
             elif message.get("action") == "add_track":
                 track_id = message.get("track_id")
                 if not isinstance(track_id, str) or not re.fullmatch(
-                    r"(?:yandex_[0-9]{1,20}|sc_[0-9]{1,20}|spotify_[A-Za-z0-9]{22}|"
+                    r"(?:yandex_[0-9]{1,20}|sc_[0-9]{1,20}|spotify_[A-Za-z0-9]{22}|apple_[0-9]{1,20}|"
                     r"vk_-?[0-9]{1,20}_[0-9]{1,20}|[A-Za-z0-9_-]{11})", track_id
                 ):
                     await manager.send(ws, {"type": "error", "error": "invalid_track_id"})
@@ -610,6 +624,12 @@ async def lobby_ws(ws: WebSocket, lobby_id: str) -> None:
                 if len(lobby.queue_items) >= 500:
                     await manager.send(ws, {"type": "error", "error": "queue_full"})
                     continue
+                if re.fullmatch(r"[A-Za-z0-9_-]{11}", track_id):
+                    from app.main import YOUTUBE_DURATION_CACHE
+
+                    if YOUTUBE_DURATION_CACHE.get(track_id, 0) > MAX_TRACK_SECONDS:
+                        await manager.send(ws, {"type": "error", "error": "Трек длиннее 12 минут"})
+                        continue
                 yandex_handle = (
                     message.get("yandex_session") if track_id.startswith("yandex_") else None
                 )
@@ -623,7 +643,7 @@ async def lobby_ws(ws: WebSocket, lobby_id: str) -> None:
                 provider_title = None
                 canonical_url = None
                 duration_ms = 0
-                if track_id.startswith(("sc_", "vk_", "spotify_")):
+                if track_id.startswith(("sc_", "vk_", "spotify_", "apple_")):
                     from app.providers.music import validate_track
 
                     provider_handle = message.get("provider_session")
@@ -632,9 +652,10 @@ async def lobby_ws(ws: WebSocket, lobby_id: str) -> None:
                     ):
                         await manager.send(ws, {"type": "error", "error": "Подключите музыкальный сервис заново"})
                         continue
-                    provider = ("spotify" if track_id.startswith("spotify_") else
+                    provider = ("apple" if track_id.startswith("apple_") else
+                                "spotify" if track_id.startswith("spotify_") else
                                 "soundcloud" if track_id.startswith("sc_") else "vk")
-                    provider_id = track_id[8:] if provider == "spotify" else track_id[3:]
+                    provider_id = track_id.split("_", 1)[1]
                     try:
                         metadata = validate_track(provider, provider_handle, provider_id)
                     except HTTPException as exc:
@@ -643,7 +664,7 @@ async def lobby_ws(ws: WebSocket, lobby_id: str) -> None:
                     provider_title = f"{metadata['title']} — {metadata['artist']}"[:200]
                     canonical_url = str(metadata["canonical_url"])
                     value = metadata.get("duration_ms")
-                    if provider == "spotify" and type(value) is int and 0 < value < 86400000:
+                    if type(value) is int and 0 < value <= MAX_TRACK_SECONDS * 1000:
                         duration_ms = value
                 lobby.queue_items.append(QueueItem(uuid4().hex, track_id, owner_id, yandex_handle,
                                                    provider_session=provider_handle,

@@ -9,7 +9,7 @@ function sourceFunction(name) {
   const start = source.indexOf(`function ${name}(`);
   assert.ok(start >= 0);
   const end = source.indexOf('\n}\n', start) + 3;
-  return new Script(`${stripTypeScriptTypes(source.slice(start, end))}; ${name}`).runInNewContext({ URL, URLSearchParams });
+  return new Script(`${stripTypeScriptTypes(source.slice(start, end))}; ${name}`).runInNewContext({ URL, URLSearchParams, MAX_TRACK_SECONDS: 720 });
 }
 const parse = sourceFunction('yandexPage');
 const vkToken = sourceFunction('vkAccessToken');
@@ -17,6 +17,15 @@ const spotifyPlayback = sourceFunction('spotifyPlayback');
 const listeningPosition = sourceFunction('listeningPosition');
 const playbackSnapshot = sourceFunction('playbackSnapshot');
 const drawerSwipe = sourceFunction('drawerSwipe');
+const playbackLength = sourceFunction('playbackLength');
+
+test('duration uses the shorter known source and caps every track at twelve minutes', () => {
+  assert.equal(playbackLength(420, 180), 180);
+  assert.equal(playbackLength(180, 420), 180);
+  assert.equal(playbackLength(Infinity, 180), 180);
+  assert.equal(playbackLength(1800, 0), 720);
+  assert.equal(playbackLength(NaN, 0), 0);
+});
 
 test('a horizontal swipe opens the matching panel and ignores vertical scrolling', () => {
   assert.equal(drawerSwipe(-80, 5, null), 'library');
@@ -124,7 +133,7 @@ function listenerHarness() {
     listenerError: { current: '' }, remoteRef: { current: snapshot }, currentItem: { id: snapshot.item_id },
     playbackRevision: 0, currentKey: 'track:0', listenerToken: 'private-listener', streamAttempt: 0,
     fallbackId: '', currentTrack: 'track', listenerApplied: { current: '' }, listenerTrack: { current: { key: '', count: 0, transport: -1, waiting: false } }, clockOffset: { current: 0 },
-    localPause: { current: false }, isSpotify: false, audioPlayers: [{ current: player }],
+    localPause: { current: false }, isSpotify: false, isApple: false, audioPlayers: [{ current: player }],
     activeAudioRef: { current: 0 }, slotKeys: { current: ['track:0', ''] },
     HTMLMediaElement: { HAVE_METADATA: 1 }, listeningPosition,
     localPlayback: () => ({ position: player.currentTime, paused: player.paused }),

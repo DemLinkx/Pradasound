@@ -7,7 +7,12 @@ import party2 from './assets/party-2.jpg';
 import party3 from './assets/party-3.jpg';
 
 type Session = { lobby_id: string; role: 'Main' | 'Member'; host_token?: string };
-type LibrarySource = 'yandex' | 'spotify' | 'soundcloud' | 'youtube' | 'vk';
+type LibrarySource = 'yandex' | 'spotify' | 'soundcloud' | 'youtube' | 'vk' | 'apple';
+const MAX_TRACK_SECONDS = 720;
+function playbackLength(native: number, catalog = 0) {
+  const lengths = [native, catalog].filter((value) => Number.isFinite(value) && value > 0);
+  return lengths.length ? Math.min(MAX_TRACK_SECONDS, ...lengths) : 0;
+}
 
 function drawerSwipe(dx: number, dy: number, open: 'queue' | 'library' | null): 'queue' | 'library' | null | undefined {
   if (Math.abs(dx) < 52 || Math.abs(dx) < Math.abs(dy) * 1.3) return undefined;
@@ -95,14 +100,14 @@ function listeningPosition(s: PlaybackSync, serverNow: number) {
   const position = s.position + (s.paused ? 0 : Math.max(0, serverNow - s.server_time) / 1000);
   return Math.max(0, Math.min(s.duration > 0 ? s.duration : 86400, position));
 }
-type MusicProvider = 'spotify' | 'soundcloud' | 'vk';
+type MusicProvider = 'spotify' | 'soundcloud' | 'vk' | 'apple';
 type MusicTrack = { id: string; title: string; artist: string; canonical_url: string; playable: boolean; reason?: string };
 type MusicLibrary = { session: string; authenticated: boolean; tracks: MusicTrack[]; next_cursor: string | null; has_more: boolean; library_error?: string; library_error_status?: number; retry_after?: number; quota_reason?: string; import_notice?: string; empty_library?: boolean; account_url?: string };
-type MusicCapability = { oauth: boolean; public_import: boolean; device_login?: boolean; native_library?: boolean; experimental_token?: boolean; token_authorization_url?: string; token_application?: string; reason?: string };
+type MusicCapability = { oauth: boolean; public_import: boolean; device_login?: boolean; native_library?: boolean; experimental_token?: boolean; musickit?: boolean; configured?: boolean; token_authorization_url?: string; token_application?: string; reason?: string };
 type MusicDeviceLogin = YandexLogin & { provider: MusicProvider };
-const MUSIC_LABELS: Record<MusicProvider, string> = { spotify: 'Spotify', soundcloud: 'SoundCloud', vk: 'VK Музыка' };
+const MUSIC_LABELS: Record<MusicProvider, string> = { spotify: 'Spotify', soundcloud: 'SoundCloud', vk: 'VK Музыка', apple: 'Apple Music' };
 const MUSIC_KEY = 'prada-sound-music';
-function sourceName(id?: string) { return id?.startsWith('yandex_') ? 'Яндекс Музыка' : id?.startsWith('spotify_') ? 'Spotify' : id?.startsWith('sc_') ? 'SoundCloud' : id?.startsWith('vk_') ? 'VK Музыка' : 'YouTube'; }
+function sourceName(id?: string) { return id?.startsWith('yandex_') ? 'Яндекс Музыка' : id?.startsWith('spotify_') ? 'Spotify' : id?.startsWith('apple_') ? 'Apple Music' : id?.startsWith('sc_') ? 'SoundCloud' : id?.startsWith('vk_') ? 'VK Музыка' : 'YouTube'; }
 function vkAccessToken(input: string) {
   let token = input.trim();
   let params: URLSearchParams | null = null;
@@ -151,7 +156,7 @@ type YtApi = { Player: new (element: HTMLElement, options: {
 const STORAGE_KEY = 'prada-sound-lobby';
 const YANDEX_KEY = 'prada-sound-yandex';
 const VIDEO_ID = /^[A-Za-z0-9_-]{11}$/;
-const QUEUE_ID = /^(?:yandex_[0-9]{1,20}|sc_[0-9]{1,20}|spotify_[A-Za-z0-9]{22}|vk_-?[0-9]{1,20}_[0-9]{1,20}|[A-Za-z0-9_-]{11})$/;
+const QUEUE_ID = /^(?:yandex_[0-9]{1,20}|sc_[0-9]{1,20}|spotify_[A-Za-z0-9]{22}|apple_[0-9]{1,20}|vk_-?[0-9]{1,20}_[0-9]{1,20}|[A-Za-z0-9_-]{11})$/;
 const guestTokens = new Map<string, string>();
 function memberToken(lobbyId: string) {
   const key = `prada-sound-member-${lobbyId}`;
@@ -166,6 +171,34 @@ function memberToken(lobbyId: string) {
 let ytApiPromise: Promise<YtApi> | null = null;
 type SpotifyUpdate = { playingURI?: string; isPaused?: boolean; isBuffering?: boolean; duration?: number; position?: number; isPreview?: boolean };
 type SpotifyProgress = { position: number; duration: number; started: boolean };
+type ApplePlayer = { isAuthorized: boolean; isPlaying: boolean; currentPlaybackTime: number; currentPlaybackDuration: number;
+  playbackState: number; volume: number; authorize: () => Promise<string>; unauthorize: () => Promise<void>;
+  setQueue: (options: { song: string }) => Promise<unknown>; play: () => Promise<unknown>; pause: () => void;
+  stop: () => void; seekToTime: (seconds: number) => Promise<void> };
+type AppleApi = { configure: (options: { developerToken: string; app: { name: string; build: string } }) => Promise<ApplePlayer | void> | ApplePlayer | void;
+  getInstance: () => ApplePlayer;
+  PlaybackStates: { ended: number; completed: number } };
+let appleMusicPromise: Promise<{ player: ApplePlayer; states: AppleApi['PlaybackStates'] }> | null = null;
+function appleMusic() {
+  return appleMusicPromise ||= (async () => {
+    const response = await fetch('/api/music/apple/config');
+    const config = await response.json();
+    if (!response.ok || typeof config.developer_token !== 'string') throw new Error(config.detail || 'Apple Music пока не настроен.');
+    const sdk = () => (window as Window & { MusicKit?: AppleApi }).MusicKit;
+    if (!sdk()) await new Promise<void>((resolve, reject) => {
+      const script = document.createElement('script'); script.src = 'https://js-cdn.music.apple.com/musickit/v3/musickit.js'; script.async = true;
+      const timer = setTimeout(() => { cleanup(); reject(new Error('Apple Music не загрузился. Проверьте соединение.')); }, 15000);
+      const ready = () => { if (sdk()) { cleanup(); resolve(); } };
+      const cleanup = () => { clearTimeout(timer); document.removeEventListener('musickitloaded', ready); };
+      document.addEventListener('musickitloaded', ready);
+      script.onload = ready; script.onerror = () => { cleanup(); script.remove(); reject(new Error('Не удалось загрузить MusicKit.')); };
+      document.head.append(script);
+    });
+    const api = sdk(); if (!api) throw new Error('MusicKit недоступен.');
+    const player = await api.configure({ developerToken: config.developer_token, app: { name: 'Prada Sound', build: '1' } }) || api.getInstance();
+    return { player, states: api.PlaybackStates };
+  })().catch((cause) => { appleMusicPromise = null; throw cause; });
+}
 type SpotifyController = { play: () => void; pause: () => void; togglePlay: () => void; seek: (seconds: number) => void;
   destroy: () => void; addListener: (event: string, listener: (event: { data: SpotifyUpdate }) => void) => void };
 type SpotifyEmbedApi = { createController: (element: HTMLElement, options: { uri: string; width: string; height: number }, callback: (controller: SpotifyController) => void) => void };
@@ -434,7 +467,7 @@ export default function App() {
   const [queueRevision, setQueueRevision] = useState(0);
   const [queueActionPending, setQueueActionPending] = useState(false);
   const [trackTitles, setTrackTitles] = useState<Record<string, string>>({});
-  const [youtubeDurations, setYoutubeDurations] = useState<Record<string, number>>({});
+  const [trackDurations, setTrackDurations] = useState<Record<string, number>>({});
   const [playbackRevision, setPlaybackRevision] = useState(0);
   const [status, setStatus] = useState<'connecting' | 'authenticating' | 'connected' | 'closed'>('closed');
   const [error, setError] = useState('');
@@ -442,6 +475,8 @@ export default function App() {
   const [creating, setCreating] = useState(false);
   const [loadingMetadata, setLoadingMetadata] = useState(false);
   const [copyNotice, setCopyNotice] = useState<{ message: string; id: number } | null>(null);
+  const [inviteTarget, setInviteTarget] = useState<'bot' | 'site'>('bot');
+  const [botUsername, setBotUsername] = useState('pradasound_bot');
   const copyNoticeId = useRef(0);
   const [attempt, setAttempt] = useState(0);
   const [yandexLogin, setYandexLogin] = useState<YandexLogin | null>(null);
@@ -460,7 +495,7 @@ export default function App() {
   const [musicLibraries, setMusicLibraries] = useState<Partial<Record<MusicProvider, MusicLibrary>>>({});
   const [musicSessions, setMusicSessions] = useState<Partial<Record<MusicProvider, string>>>(() => {
     try { const data = JSON.parse(sessionStorage.getItem(MUSIC_KEY) || '{}');
-      return Object.fromEntries((['spotify', 'soundcloud', 'vk'] as MusicProvider[]).filter((key) => typeof data[key] === 'string').map((key) => [key, data[key]]));
+      return Object.fromEntries((['spotify', 'soundcloud', 'vk', 'apple'] as MusicProvider[]).filter((key) => typeof data[key] === 'string').map((key) => [key, data[key]]));
     } catch { return {}; }
   });
   const [musicUrl, setMusicUrl] = useState('');
@@ -519,6 +554,12 @@ export default function App() {
   const spotifyMount = useRef<HTMLDivElement>(null);
   const spotifyPlayer = useRef<SpotifyController | null>(null);
   const [spotifyReady, setSpotifyReady] = useState(false);
+  const applePlayer = useRef<ApplePlayer | null>(null);
+  const [appleReady, setAppleReady] = useState(false);
+  const [appleAuthorized, setAppleAuthorized] = useState(false);
+  const [appleLoginReady, setAppleLoginReady] = useState(false);
+  const [resolvingAlternative, setResolvingAlternative] = useState(false);
+  const appleCommands = useRef<Promise<unknown>>(Promise.resolve());
   const preparedAudio = useRef(new Map<string, { promise: Promise<string>; expiresAt: number }>());
   const audioRetryKey = useRef('');
   const retryCount = useRef(0);
@@ -538,11 +579,12 @@ export default function App() {
       if (current) current.volume = volumeRef.current;
     }
     ytPlayer.current?.setVolume?.(volume);
+    if (applePlayer.current) applePlayer.current.volume = volume / 100;
   }, [volume]);
 
   function syncPlaybackTime(player: HTMLAudioElement) {
     setPlaybackTime(Number.isFinite(player.currentTime) ? player.currentTime : 0);
-    setPlaybackDuration(youtubeDurations[currentTrack || ''] || (Number.isFinite(player.duration) ? player.duration : 0));
+    setPlaybackDuration(playbackLength(player.duration, trackDurations[currentTrack || ''] || (currentItem?.duration_ms || 0) / 1000));
   }
 
   useEffect(() => {
@@ -612,6 +654,9 @@ export default function App() {
 
   useEffect(() => {
     const controller = new AbortController();
+    void fetch('/api/lobby/config', { signal: controller.signal }).then((response) => response.json()).then((data) => {
+      if (typeof data.telegram_bot_username === 'string' && /^[A-Za-z0-9_]{5,32}$/.test(data.telegram_bot_username)) setBotUsername(data.telegram_bot_username);
+    }).catch(() => {});
     void fetch('/api/music/providers', { signal: controller.signal }).then(async (response) => {
       if (!response.ok) throw new Error();
       const data = await response.json(); setMusicCapabilities(data.providers);
@@ -622,7 +667,7 @@ export default function App() {
   useEffect(() => {
     try { sessionStorage.setItem(MUSIC_KEY, JSON.stringify(musicSessions)); } catch {}
     const controllers: AbortController[] = [];
-    for (const provider of ['spotify', 'soundcloud', 'vk'] as MusicProvider[]) {
+    for (const provider of ['spotify', 'soundcloud', 'vk', 'apple'] as MusicProvider[]) {
       const handle = musicSessions[provider];
       if (!handle || musicLibraries[provider]) continue;
       const controller = new AbortController(); controllers.push(controller);
@@ -636,6 +681,14 @@ export default function App() {
     }
     return () => controllers.forEach((controller) => controller.abort());
   }, [musicSessions]);
+
+  useEffect(() => {
+    if (librarySource !== 'apple' || !musicCapabilities.apple?.configured) return;
+    let active = true;
+    void appleMusic().then(({ player }) => { if (active) { applePlayer.current = player; setAppleLoginReady(true); setAppleAuthorized(player.isAuthorized); } })
+      .catch((cause) => { if (active) setMusicError(cause instanceof Error ? cause.message : 'Не удалось подготовить Apple Music.'); });
+    return () => { active = false; };
+  }, [librarySource, musicCapabilities.apple?.configured]);
 
   useEffect(() => {
     const ws = socket.current;
@@ -844,6 +897,7 @@ export default function App() {
   const currentItem = queueItems[0];
   const currentTrack = currentItem?.track_id;
   const isSpotify = currentTrack?.startsWith('spotify_') === true;
+  const isApple = currentTrack?.startsWith('apple_') === true;
   const currentKey = `${playbackRevision}:${currentItem?.id}`;
   const playbackDevice = session?.role === 'Main' || Boolean(listenTogether && listenerToken && hostOnline && status === 'connected');
   const renderPlayer = session?.role === 'Main' || listenTogether;
@@ -855,13 +909,13 @@ export default function App() {
     ? `${nextItem.id}:${nextItem.access_revision || 0}` : session?.host_token;
   const audioCacheKey = (item: QueueItem) => `${item.id}:${item.access_revision || 0}`;
   async function resolveAudio(item: QueueItem, signal: AbortSignal): Promise<string> {
-    if (item.track_id.startsWith('spotify_')) throw new Error('Оригинал Spotify воспроизводится в его встроенном плеере.');
+    if (item.track_id.startsWith('spotify_') || item.track_id.startsWith('apple_')) throw new Error(`Оригинал ${sourceName(item.track_id)} воспроизводится в личном плеере сервиса.`);
     if (session?.role === 'Member') {
       if (!listenerToken) throw new Error('Включите «Слушать вместе».');
       const response = await fetch(`/api/listen/${session.lobby_id}/${item.id}/stream`, { signal, headers: { 'X-Listener-Token': listenerToken } });
       const data: { url?: string; detail?: string; duration?: number } = await response.json();
-      if (!response.ok || !data.url) throw new Error(data.detail || 'Не удалось подготовить музыку для слушателя.');
-      if (VIDEO_ID.test(item.track_id) && typeof data.duration === 'number' && data.duration > 0 && data.duration <= 86400) setYoutubeDurations((old) => ({ ...old, [item.track_id]: data.duration! }));
+      if (!response.ok || !data.url) throw Object.assign(new Error(data.detail || 'Не удалось подготовить музыку для слушателя.'), { unsupported: response.status === 422 });
+      if (typeof data.duration === 'number' && data.duration > 0 && data.duration <= 86400) setTrackDurations((old) => ({ ...old, [item.track_id]: data.duration! }));
       if (!(data.url.startsWith('/api/music/') || data.url.startsWith('/api/youtube/audio/file/') || new URL(data.url).protocol === 'https:')) throw new Error('Некорректная аудиоссылка.');
       return data.url;
     }
@@ -876,8 +930,8 @@ export default function App() {
         { 'X-Lobby-Id': session.lobby_id, 'X-Host-Token': session.host_token },
     });
     const data: { url?: string; detail?: string; duration?: number } = await response.json();
-    if (!response.ok || !data.url) throw new Error(data.detail || `Аудиопоток недоступен (HTTP ${response.status}).`);
-    if (VIDEO_ID.test(item.track_id) && typeof data.duration === 'number' && data.duration > 0 && data.duration <= 86400) setYoutubeDurations((old) => ({ ...old, [item.track_id]: data.duration! }));
+    if (!response.ok || !data.url) throw Object.assign(new Error(data.detail || `Аудиопоток недоступен (HTTP ${response.status}).`), { unsupported: response.status === 422 });
+    if (typeof data.duration === 'number' && data.duration > 0 && data.duration <= 86400) setTrackDurations((old) => ({ ...old, [item.track_id]: data.duration! }));
     if (music ? !(data.url.startsWith('/api/music/') || new URL(data.url).protocol === 'https:') : yandex ? new URL(data.url).protocol !== 'https:' :
         !/^\/api\/youtube\/audio\/file\/[A-Za-z0-9_-]+$/.test(data.url)) throw new Error('Некорректная аудиоссылка.');
     return data.url;
@@ -899,6 +953,15 @@ export default function App() {
     const player = audioPlayers[slot].current;
     if (player) { player.pause(); player.removeAttribute('src'); player.load(); }
   }
+  function warmNextAudio() {
+    const current = audioPlayers[activeAudioRef.current].current;
+    const ready = preloaded.current;
+    if (!ready || ready.key !== currentKey || !current) return;
+    const duration = playbackLength(current.duration, trackDurations[currentTrack || ''] || (currentItem?.duration_ms || 0) / 1000);
+    if (!duration || duration - current.currentTime > 30) return;
+    const next = audioPlayers[ready.slot].current;
+    if (next && next.preload !== 'auto') { next.preload = 'auto'; if (hlsPlayers.current[ready.slot]) hlsPlayers.current[ready.slot]?.startLoad(); else next.load(); }
+  }
   async function loadAudio(slot: number, url: string, signal: AbortSignal) {
     hlsPlayers.current[slot]?.destroy(); hlsPlayers.current[slot] = null;
     const player = audioPlayers[slot].current;
@@ -908,7 +971,7 @@ export default function App() {
       const Hls = (await import('hls.js')).default;
       if (signal.aborted || slotKeys.current[slot] !== key) return;
       if (!Hls.isSupported()) throw new Error('Этот браузер не поддерживает HLS-аудиопоток. Откройте сайт в современном браузере.');
-      const hls = new Hls({ enableWorker: false, backBufferLength: 5, maxBufferLength: 20, maxMaxBufferLength: 30, maxBufferSize: 4000000 });
+      const hls = new Hls({ autoStartLoad: slot === activeAudioRef.current, enableWorker: false, backBufferLength: 5, maxBufferLength: 20, maxMaxBufferLength: 30, maxBufferSize: 4000000 });
       hlsPlayers.current[slot] = hls;
       hls.on(Hls.Events.ERROR, (_event, data) => { if (data.fatal && hlsPlayers.current[slot] === hls && slot === activeAudioRef.current) {
         setAudioError('Аудиопоток прервался. Повторите загрузку или выберите следующий трек.'); setPlayingKey('');
@@ -971,7 +1034,7 @@ export default function App() {
     setAudioUrl('');
     setAudioError('');
     setFallbackId('');
-    if (!playbackDevice || !currentItem || isSpotify) return;
+    if (!playbackDevice || !currentItem || isSpotify || isApple) return;
     const controller = new AbortController();
     void (async () => {
       try {
@@ -990,7 +1053,9 @@ export default function App() {
         }
       } catch (cause) {
         if (!controller.signal.aborted) {
-          if (!VIDEO_ID.test(currentItem.track_id)) {
+          if (cause && typeof cause === 'object' && 'unsupported' in cause && cause.unsupported && session?.role === 'Main') {
+            setCopyNotice({ message: cause instanceof Error ? cause.message : 'Трек недоступен — пропускаем', id: ++copyNoticeId.current }); skipTrack();
+          } else if (!VIDEO_ID.test(currentItem.track_id)) {
             setAudioError(cause instanceof Error ? cause.message : 'Не удалось открыть аудио.');
             setPlayingKey('');
           } else setFallbackId(currentTrack);
@@ -1016,7 +1081,7 @@ export default function App() {
     if (player) player.volume = 0;
     slotKeys.current[slot] = '';
     preloaded.current = null;
-    if (!nextItem || nextItem.track_id.startsWith('spotify_')) return;
+    if (!nextItem || nextItem.track_id.startsWith('spotify_') || nextItem.track_id.startsWith('apple_')) return;
     void (async () => {
       try {
         const url = await prepareAudio(nextItem);
@@ -1102,6 +1167,38 @@ export default function App() {
   }, [currentKey, session?.role, session?.lobby_id, streamAttempt, playbackDevice]);
 
   useEffect(() => {
+    setAppleReady(false);
+    if (!isApple || !playbackDevice || !currentItem) return;
+    let active = true, started = false;
+    let timer: ReturnType<typeof setInterval> | undefined;
+    let mountedPlayer: ApplePlayer | null = null;
+    appleCommands.current = appleCommands.current.catch(() => {}).then(async () => {
+      const { player, states } = await appleMusic();
+      if (!active) return;
+      mountedPlayer = player; applePlayer.current = player; setAppleAuthorized(player.isAuthorized);
+      if (!player.isAuthorized) { setAudioError('Подключите Apple Music на этом устройстве для воспроизведения оригинала.'); return; }
+      await player.setQueue({ song: currentItem.track_id.slice(6) });
+      if (!active) return;
+      player.volume = volumeRef.current; setAppleReady(true); setAudioError('');
+      const update = () => {
+        if (!active) return;
+        const duration = player.currentPlaybackDuration || 0, position = player.currentPlaybackTime || 0;
+        if (duration > 0 && duration <= 31 && (currentItem.duration_ms || 0) > 45000) {
+          player.pause(); setPlayingKey(''); setAudioError('Apple Music предоставил превью. Для полного трека нужен собственный доступ к Apple Music на этом устройстве.'); return;
+        }
+        started ||= player.isPlaying;
+        setPlaybackTime(position); setPlaybackDuration(playbackLength(duration, (currentItem.duration_ms || 0) / 1000));
+        setPlayingKey(player.isPlaying ? currentKey : '');
+        if (started && (player.playbackState === states.ended || player.playbackState === states.completed)) skipTrack();
+      };
+      timer = setInterval(update, 400);
+      if (session?.role === 'Main') await player.play().catch(() => { if (active) setAudioError('Нажмите ▶, чтобы разрешить Apple Music.'); });
+      update();
+    }).catch((cause) => { if (active) setAudioError(cause instanceof Error ? cause.message : 'Apple Music недоступен.'); });
+    return () => { active = false; if (timer) clearInterval(timer); mountedPlayer?.pause(); };
+  }, [currentKey, session?.role, playbackDevice, appleAuthorized, streamAttempt]);
+
+  useEffect(() => {
     if (!fallbackId || fallbackId !== currentTrack || !playbackDevice || !ytMount.current) return;
     let active = true;
     const startupTimer = window.setTimeout(() => {
@@ -1113,7 +1210,7 @@ export default function App() {
       ytMount.current.append(mount);
       ytPlayer.current = new api.Player(mount, {
         videoId: fallbackId, width: 220, height: 200,
-        playerVars: { autoplay: session?.role === 'Main' ? 1 : 0, playsinline: 1, controls: 0, origin: location.origin },
+        playerVars: { end: MAX_TRACK_SECONDS, autoplay: session?.role === 'Main' ? 1 : 0, playsinline: 1, controls: 0, origin: location.origin },
         events: {
           onReady: (event) => { if (active) { ytPlayer.current = event.target; event.target.setVolume(volumeRef.current * 100); if (session?.role === 'Main') event.target.playVideo(); else syncListener(); } },
           onStateChange: (event) => {
@@ -1147,7 +1244,7 @@ export default function App() {
       if (!player || typeof player.getDuration !== 'function' || typeof player.getCurrentTime !== 'function') return;
       const duration = player.getDuration();
       const time = player.getCurrentTime();
-      setPlaybackDuration(Number.isFinite(duration) ? duration : 0);
+      setPlaybackDuration(playbackLength(duration));
       setPlaybackTime(Number.isFinite(time) ? time : 0);
     }, 400);
     return () => clearInterval(timer);
@@ -1164,18 +1261,22 @@ export default function App() {
   }, [listenTogether, status, session?.role, session?.lobby_id]);
 
   function localPlayback() {
+    if (isApple) {
+      const player = applePlayer.current;
+      return player && appleReady ? { position: player.currentPlaybackTime || 0, duration: playbackLength(player.currentPlaybackDuration, (currentItem?.duration_ms || 0) / 1000), paused: !player.isPlaying } : { position: 0, duration: 0, paused: true };
+    }
     if (isSpotify) {
       const s = spotifyProgress.current;
       if (s.key !== currentKey) return { position: 0, duration: 0, paused: true };
       return { position: s.position + (s.paused ? 0 : (performance.now() - s.at) / 1000), duration: s.duration, paused: s.paused };
     }
     if (fallbackId === currentTrack && currentTrack) {
-      try { return { position: ytPlayer.current?.getCurrentTime() || 0, duration: ytPlayer.current?.getDuration() || 0, paused: playingKey !== currentKey }; }
+      try { return { position: ytPlayer.current?.getCurrentTime() || 0, duration: playbackLength(ytPlayer.current?.getDuration() || 0, trackDurations[currentTrack] || 0), paused: playingKey !== currentKey }; }
       catch { return { position: 0, duration: 0, paused: true }; }
     }
     const player = audioPlayers[activeAudioRef.current].current;
     return player && slotKeys.current[activeAudioRef.current] === currentKey ?
-      { position: player.currentTime, duration: youtubeDurations[currentTrack || ''] || (Number.isFinite(player.duration) ? player.duration : 0), paused: player.paused } :
+      { position: player.currentTime, duration: playbackLength(player.duration, trackDurations[currentTrack || ''] || (currentItem?.duration_ms || 0) / 1000), paused: player.paused } :
       { position: 0, duration: 0, paused: true };
   }
 
@@ -1192,6 +1293,19 @@ export default function App() {
     return () => clearInterval(timer);
   }, [currentKey, playingKey, audioUrl, fallbackId, session?.role, status]);
 
+  useEffect(() => {
+    if (session?.role !== 'Main' || !playbackDevice || !currentItem) return;
+    const timer = setInterval(() => {
+      const state = localPlayback();
+      const limit = playbackLength(state.duration, (currentItem.duration_ms || 0) / 1000) || MAX_TRACK_SECONDS;
+      if (state.position >= limit && skipSent.current !== currentKey) {
+        if (fading.current) finishFade();
+        else { audioPlayers[activeAudioRef.current].current?.pause(); ytPlayer.current?.pauseVideo(); if (isApple) applePlayer.current?.pause(); if (isSpotify) spotifyPlayer.current?.pause(); skipTrack(); }
+      }
+    }, 400);
+    return () => clearInterval(timer);
+  }, [currentKey, playbackDevice, playingKey, trackDurations, fallbackId, appleReady, session?.role]);
+
   function syncListener(force = false) {
     if (session?.role !== 'Member' || !playbackDevice || !listenWanted.current || listenerError.current && !force) return;
     const snapshot = remoteRef.current;
@@ -1206,7 +1320,13 @@ export default function App() {
     const count = newTrack ? previous.count + 1 : previous.count;
     const align = force || count === 1 || (newTrack && count % 5 === 0) || (!newTrack && previous.transport !== (snapshot.transport_serial ?? snapshot.serial) && !(previous.waiting && !snapshot.paused));
     try {
-      if (isSpotify) {
+      if (isApple) {
+        const player = applePlayer.current; if (!player || !appleReady) return;
+        listenerApplied.current = command;
+        if (align && Math.abs(actual.position - target) > .5) void player.seekToTime(target).catch(() => {});
+        if (paused) { if (!actual.paused) player.pause(); }
+        else if (actual.paused) void player.play().catch(() => setAudioError('Нажмите ▶ для воспроизведения Apple Music.'));
+      } else if (isSpotify) {
         const player = spotifyPlayer.current;
         if (!player || !spotifyReady) return;
         listenerApplied.current = command;
@@ -1240,7 +1360,7 @@ export default function App() {
   useEffect(() => {
     if (session?.role !== 'Member' || !playbackDevice) return;
     syncListener();
-  }, [currentKey, playbackDevice, remotePlayback, audioUrl, spotifyReady, fallbackId, playingKey, listenPaused, audioError]);
+  }, [currentKey, playbackDevice, remotePlayback, audioUrl, spotifyReady, appleReady, fallbackId, playingKey, listenPaused, audioError]);
 
   function toggleListenTogether() {
     const enabled = !listenTogether;
@@ -1412,7 +1532,7 @@ export default function App() {
   function enqueueMusic(track: MusicTrack) {
     const provider = musicProvider; const library = musicLibraries[provider];
     if (!library || !track.playable) return;
-    if (provider !== 'spotify') { enqueue(`${provider === 'soundcloud' ? 'sc' : 'vk'}_${track.id}`, `${track.title} — ${track.artist}`, library.session); return; }
+    if (provider !== 'spotify') { enqueue(`${provider === 'apple' ? 'apple' : provider === 'soundcloud' ? 'sc' : 'vk'}_${track.id}`, `${track.title} — ${track.artist}`, library.session); return; }
     if (!spotifyConsent) { enqueue(`spotify_${track.id}`, `${track.title} — ${track.artist}`, library.session); return; }
     const lobbyId = session?.lobby_id;
     void musicOperationRequest(async (signal) => {
@@ -1427,12 +1547,38 @@ export default function App() {
     });
   }
 
+  function startAppleLogin() {
+    void musicOperationRequest(async (signal) => {
+      const { player } = await appleMusic();
+      const token = await player.authorize();
+      if (signal.aborted) return;
+      applePlayer.current = player; setAppleAuthorized(true);
+      const library = await musicJson('/api/music/apple/login', { method: 'POST', signal,
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }) });
+      if (!signal.aborted) { acceptMusic('apple', library); if (isApple && !appleReady) setStreamAttempt((value) => value + 1); }
+    });
+  }
+
+  async function useSpotifyAlternative() {
+    if (!session?.host_token || !currentItem || !isSpotify || resolvingAlternative) return;
+    const lobbyId = session.lobby_id;
+    setResolvingAlternative(true); setAudioError('');
+    try {
+      const response = await fetch(`/api/music/queue/${lobbyId}/${currentItem.id}/youtube`, { method: 'POST', headers: { 'X-Host-Token': session.host_token } });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || 'Не удалось подобрать версию YouTube.');
+      if (lastRoom.current === lobbyId) setCopyNotice({ message: `Источник заменён на YouTube: ${data.matched_title || 'трек найден'}`, id: ++copyNoticeId.current });
+    } catch (cause) { if (lastRoom.current === lobbyId) setAudioError(cause instanceof Error ? cause.message : 'Ошибка подбора YouTube.'); }
+    finally { setResolvingAlternative(false); }
+  }
+
   async function disconnectMusic() {
     const provider = musicProvider; const library = musicLibraries[provider];
     if (!library || musicBusy) return;
     void musicOperationRequest(async (signal) => {
       const response = await fetch(`/api/music/${provider}/disconnect`, { method: 'POST', signal, headers: { 'X-Music-Session': library.session } });
       if (!response.ok) throw new Error('Не удалось отключить сервис. Повторите попытку.');
+      if (provider === 'apple' && applePlayer.current) { applePlayer.current.pause(); await applePlayer.current.unauthorize(); setAppleAuthorized(false); }
       setMusicSessions((previous) => { const next = { ...previous }; delete next[provider]; return next; });
       setMusicLibraries((previous) => { const next = { ...previous }; delete next[provider]; return next; });
     });
@@ -1608,6 +1754,7 @@ export default function App() {
       localPause.current = paused; setListenPaused(paused); listenerError.current = '';
       syncListener(true); return;
     }
+    if (isApple) { const player = applePlayer.current; if (player?.isPlaying) player.pause(); else void player?.play().catch(() => setAudioError('Не удалось начать Apple Music. Проверьте подключение и подписку.')); return; }
     if (isSpotify) { spotifyPlayer.current?.togglePlay(); return; }
     if (fallbackId === currentTrack) {
       if (playingKey === currentKey) ytPlayer.current?.pauseVideo();
@@ -1631,7 +1778,8 @@ export default function App() {
     if (!currentTrack || !playbackDuration || session?.role !== 'Main') return;
     const target = Math.max(0, Math.min(seconds, playbackDuration));
     setPlaybackTime(target);
-    if (isSpotify) spotifyPlayer.current?.seek(Math.floor(target));
+    if (isApple) void applePlayer.current?.seekToTime(target).catch(() => setAudioError('Не удалось перемотать Apple Music.'));
+    else if (isSpotify) spotifyPlayer.current?.seek(Math.floor(target));
     else if (fallbackId === currentTrack) ytPlayer.current?.seekTo(target, true);
     else {
       const current = audioPlayers[activeAudioRef.current].current;
@@ -1672,8 +1820,8 @@ export default function App() {
     const ready = preloaded.current;
     const next = ready && audioPlayers[ready.slot].current;
     if (!old || old.paused || !ready || ready.key !== currentKey || ready.id !== nextItem?.id || !next ||
-        next.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || !Number.isFinite(youtubeDurations[currentTrack || ''] || old.duration) ||
-        (youtubeDurations[currentTrack || ''] || old.duration) - old.currentTime > 3) return;
+        next.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || !playbackLength(old.duration, trackDurations[currentTrack || ''] || (currentItem?.duration_ms || 0) / 1000) ||
+        playbackLength(old.duration, trackDurations[currentTrack || ''] || (currentItem?.duration_ms || 0) / 1000) - old.currentTime > 3) return;
     fading.current = true;
     old.volume = volumeRef.current;
     next.pause();
@@ -1695,7 +1843,9 @@ export default function App() {
   }
 
   const statusLabel = { connecting: 'Подключение…', authenticating: 'Вход…', connected: 'Подключено', closed: 'Отключено' }[status];
-  const inviteUrl = session ? `${location.origin}${location.pathname}?lobby=${session.lobby_id}` : '';
+  const siteInviteUrl = session ? `${location.origin}${location.pathname}?lobby=${session.lobby_id}` : '';
+  const botInviteUrl = session ? `https://t.me/${botUsername}?start=l_${session.lobby_id}` : '';
+  const inviteUrl = inviteTarget === 'bot' ? botInviteUrl : siteInviteUrl;
   const qr = useMemo(() => inviteUrl ? qrPath(inviteUrl) : '', [inviteUrl]);
   function selectLibrary(source: LibrarySource) {
     setLibrarySource(source); setLibraryLimit(50); setLibraryScanError('');
@@ -1925,7 +2075,7 @@ export default function App() {
           </div>
           <div className="deck-controls">
             <button className="deck-play" aria-label={playingKey === currentKey ? 'Пауза' : 'Воспроизвести'}
-              disabled={!playbackDevice || !currentTrack || (isSpotify ? !spotifyReady : !audioUrl && fallbackId !== currentTrack)} onClick={togglePlayback}>
+              disabled={!playbackDevice || !currentTrack || (isApple ? !appleReady : isSpotify ? !spotifyReady : !audioUrl && fallbackId !== currentTrack)} onClick={togglePlayback}>
               {playingKey === currentKey && currentTrack ? <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="4" width="4" height="16" rx="1" /><rect x="14" y="4" width="4" height="16" rx="1" /></svg> :
                 <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 4.7a1 1 0 0 1 1.5-.86l11 7.3a1 1 0 0 1 0 1.72l-11 7.3A1 1 0 0 1 8 19.3z" /></svg>}
             </button>
@@ -1951,14 +2101,14 @@ export default function App() {
               <span>{volume}%</span>
             </div>}
           </div>
-          {[0, 1].map((slot) => <audio key={slot} ref={audioPlayers[slot]} preload="auto"
+          {[0, 1].map((slot) => <audio key={slot} ref={audioPlayers[slot]} preload={slot === activeAudio ? "auto" : "metadata"}
             style={{ display: 'none' }}
             onPlay={() => { if (slot === activeAudioRef.current && slotKeys.current[slot] === currentKey) setPlayingKey(currentKey);
               else if (!fading.current) audioPlayers[slot].current?.pause(); }}
             onPause={() => { if (slot === activeAudioRef.current && slotKeys.current[slot] === currentKey && !fading.current && !promoting.current) setPlayingKey(''); }}
             onLoadedMetadata={(event) => { if (slot === activeAudioRef.current && slotKeys.current[slot] === currentKey) { syncPlaybackTime(event.currentTarget); syncListener(); } }}
             onDurationChange={(event) => { if (slot === activeAudioRef.current && slotKeys.current[slot] === currentKey) syncPlaybackTime(event.currentTarget); }}
-            onTimeUpdate={(event) => { if (slot === activeAudioRef.current && slotKeys.current[slot] === currentKey) { syncPlaybackTime(event.currentTarget); const duration = youtubeDurations[currentTrack || '']; if (session.role === 'Main' && duration && event.currentTarget.currentTime >= duration) { if (fading.current) finishFade(); else skipTrack(); } } maybeCrossfade(slot); }}
+            onTimeUpdate={(event) => { if (slot === activeAudioRef.current && slotKeys.current[slot] === currentKey) { syncPlaybackTime(event.currentTarget); warmNextAudio(); const duration = playbackLength(event.currentTarget.duration, trackDurations[currentTrack || ''] || (currentItem?.duration_ms || 0) / 1000) || MAX_TRACK_SECONDS; if (session.role === 'Main' && event.currentTarget.currentTime >= duration) { if (fading.current) finishFade(); else skipTrack(); } } maybeCrossfade(slot); }}
             onEnded={() => { if (slot === activeAudioRef.current && slotKeys.current[slot] === currentKey) {
               if (session.role !== 'Main') { setPlayingKey(''); return; }
               const next = preloaded.current && audioPlayers[preloaded.current.slot].current;
@@ -1982,6 +2132,8 @@ export default function App() {
             } }} />)}
           <div className="deck-message">{currentTrack ? <>
             {isSpotify && <p className="muted small">Воспроизведение оригинала через Spotify в этом браузере. Полный доступ может требовать входа в его плеере и Premium. Громкость регулируется в Spotify или на устройстве; переход к следующему треку — без мешапа.</p>}
+            {isSpotify && session.role === 'Main' && <><button className="button tiny" disabled={resolvingAlternative || status !== 'connected'} onClick={() => void useSpotifyAlternative()}>{resolvingAlternative ? 'Подбираем запись…' : 'Найти версию YouTube для комнаты'}</button><p className="muted small">Заменит источник текущего трека для всей комнаты. Эта запись может отличаться от Spotify.</p></>}
+            {isApple && <><p className="muted small">Apple Music · экспериментально. Оригинал играет через MusicKit с вашим доступом на этом устройстве; вход автора трека другим участникам не передаётся.</p>{!appleAuthorized && <button className="button tiny" onClick={() => { selectLibrary('apple'); if (isMobile) setDrawer('library'); else document.getElementById('music-services')?.scrollIntoView({ behavior: 'smooth' }); }}>Подключить Apple Music</button>}</>}
             {fallbackId === currentTrack && <p className="muted small">Аудиопоток YouTube недоступен — пробуем встроенный плеер.</p>}
             {fallbackId === currentTrack && session.role === 'Main' && <button className="button tiny" onClick={() => { if (typeof ytPlayer.current?.playVideo === 'function') ytPlayer.current.playVideo(); }}>Запустить YouTube</button>}
             {session.role === 'Member' && !remotePlayback && <p className="muted small">Ждём позицию воспроизведения от хоста…</p>}
@@ -1995,10 +2147,11 @@ export default function App() {
               if (currentItem) preparedAudio.current.delete(audioCacheKey(currentItem));
               setStreamAttempt((value) => value + 1);
             }}>Повторить загрузку аудио</button>}
-            {!audioUrl && !audioError && !isSpotify && fallbackId !== currentTrack && <p className="muted small">Получаем аудиопоток…</p>}
+            {!audioUrl && !audioError && !isSpotify && !isApple && fallbackId !== currentTrack && <p className="muted small">Получаем аудиопоток…</p>}
           </> : null}</div>
         </section>}
         <section className="card cardpad share-card" id="share-room"><div className="sectionhead"><div><span className="eyebrow">ПРИГЛАСИТЬ ДРУЗЕЙ</span><h3>Поделиться комнатой</h3></div></div>
+          <div className="row" role="group" aria-label="Способ приглашения" style={{ marginBottom: 14 }}><button className={`button tiny ${inviteTarget === 'bot' ? 'primary' : ''}`} aria-pressed={inviteTarget === 'bot'} onClick={() => setInviteTarget('bot')}>Через бота</button><button className={`button tiny ${inviteTarget === 'site' ? 'primary' : ''}`} aria-pressed={inviteTarget === 'site'} onClick={() => setInviteTarget('site')}>Ссылка на сайт</button></div>
           <div className="share"><div className="sharetext"><p className="muted small">Отправьте ссылку или покажите QR-код.</p>
             <button className="button sharelink" title={inviteUrl} onClick={() => void copy(inviteUrl, 'Ссылка')}>{inviteUrl}</button>
             {telegramInitData && <button className="button tiny invite-button" onClick={() =>
@@ -2070,9 +2223,10 @@ export default function App() {
           </SwipeTrack>)}</ul>}
           {(filteredYandexTracks.length > libraryLimit || yandexConnected && hasMoreLikes) && <button className="button tiny load-more" onClick={() => { setLibraryLimit((value) => value + 50); if (filteredYandexTracks.length <= libraryLimit && !libraryScanning) void showMoreLikes(); }} disabled={loadingLikes || libraryScanning}>Показать ещё</button>}
         </section>
-        <section className="card cardpad music-card" id="music-services" hidden={!(['spotify', 'soundcloud', 'vk'] as string[]).includes(librarySource)}><span className="eyebrow">БОЛЬШЕ МУЗЫКИ</span>
+        <section className="card cardpad music-card" id="music-services" hidden={!(['spotify', 'soundcloud', 'vk', 'apple'] as string[]).includes(librarySource)}><span className="eyebrow">БОЛЬШЕ МУЗЫКИ</span>
           <h3>{MUSIC_LABELS[musicProvider]}</h3>
           <div role="tabpanel" aria-label={MUSIC_LABELS[musicProvider]}>
+            {musicProvider === 'apple' && <><p className="muted small">Apple Music · экспериментально. Подключите личную медиатеку через окно Apple. Для воспроизведения оригиналов нужен собственный доступ к Apple Music на устройстве слушателя.</p><button className="button primary" disabled={musicBusy || !musicCapability?.configured || !appleLoginReady} onClick={startAppleLogin}>{musicCapability?.configured && !appleLoginReady ? 'Подготовка Apple Music…' : 'Подключить Apple Music'}</button>{!musicCapability?.configured && <p className="muted small">Экспериментальное подключение пока не настроено.</p>}</>}
             {musicProvider === 'soundcloud' && <p className="muted small">Импортируйте публичные лайки по ссылке на профиль — бесплатного аккаунта достаточно. Приватная библиотека доступна через вход, когда подключено приложение SoundCloud.</p>}
             {musicProvider === 'spotify' && <p className="muted small">{musicCapability?.native_library ? 'Подключите аккаунт, чтобы загрузить любимые треки. ' : 'Вставьте ссылку на публичный плейлист. '}По умолчанию добавляем оригинал Spotify: хост слушает его в родном плеере, где может потребоваться вход с Premium. Подбор через YouTube включается отдельно ниже.</p>}
             {musicProvider === 'vk' && <p className="muted small">Экспериментальное подключение своей музыки через публичный OAuth. После подтверждения VK проверим, разрешён ли доступ к аудиозаписям.</p>}
@@ -2138,6 +2292,7 @@ export default function App() {
         </section>
 
           <button className="library-vk" onClick={() => selectLibrary('vk')}>VK Музыка · экспериментально ↗</button>
+          <button className="library-vk" onClick={() => selectLibrary('apple')}>Apple Music · экспериментально ↗</button>
           <div ref={libraryEnd} className="library-end" aria-hidden="true" />
           </div>
         </aside>

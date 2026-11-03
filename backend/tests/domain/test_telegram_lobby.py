@@ -98,6 +98,16 @@ def test_telegram_host_and_queue_attribution() -> None:
                 assert main_updated["profiles"][identity["owner_id"]]["username"] == "guest_67890"
 
 
+def test_bot_invite_keeps_room_when_opening_mini_app(monkeypatch) -> None:
+    from urllib.parse import parse_qs, urlparse
+
+    monkeypatch.setattr(lobby, "telegram_mini_app_url", "https://sound.example/?source=telegram")
+    reply = lobby.telegram_reply({"message": {"chat": {"id": 1, "type": "private"},
+                                              "text": "/start l_" + "a" * 32}})
+    url = reply["reply_markup"]["inline_keyboard"][0][0]["web_app"]["url"]
+    assert parse_qs(urlparse(url).query) == {"source": ["telegram"], "lobby": ["a" * 32]}
+
+
 def test_host_token_cannot_be_used_by_another_telegram_account() -> None:
     with TestClient(app) as client:
         room = client.post("/api/lobby/create", json={"init_data": signed_data(12345)}).json()

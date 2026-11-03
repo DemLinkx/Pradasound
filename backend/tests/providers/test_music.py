@@ -329,6 +329,91 @@ def test_public_soundcloud_import_restores_page(client, monkeypatch, offset):
     assert mismatch.status_code == 400
 
 
+def test_apple_login_is_disabled_without_developer_configuration(client, monkeypatch):
+    monkeypatch.delenv("APPLE_MUSIC_DEVELOPER_TOKEN", raising=False)
+    monkeypatch.setattr(music.settings, "apple_music_developer_token", "")
+    capability = client.get("/api/music/providers").json()["providers"]["apple"]
+    assert capability["experimental"] and not capability["configured"]
+    assert client.get("/api/music/apple/config").status_code == 503
+    assert client.post("/api/music/apple/login", json={"token": "private-user-token"}).status_code == 503
+    assert not music.SESSIONS
+
+
+def test_apple_library_uses_private_user_token_and_catalog_ids(client, monkeypatch):
+    monkeypatch.setattr(music.settings, "apple_music_developer_token", "developer-jwt")
+
+    def handler(request):
+        assert request.url.host == "api.music.apple.com"
+        assert request.headers["Music-User-Token"] == "private-user-token"
+        assert request.headers["Authorization"] == "Bearer developer-jwt"
+        assert request.url.params["limit"] == "50"
+        return httpx.Response(200, json={"data": [
+            {"id": "i.private", "attributes": {"name": "Song", "artistName": "Artist",
+             "durationInMillis": 180000, "playParams": {"catalogId": "123"}}},
+            {"id": "i.long", "attributes": {"name": "Long", "durationInMillis": 900000,
+             "playParams": {"catalogId": "456"}}},
+        ]})
+
+    monkeypatch.setattr(music, "_client", lambda proxy=None: httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), trust_env=False))
+    response = client.post("/api/music/apple/login", json={"token": "private-user-token"})
+    assert response.status_code == 200
+    assert "private-user-token" not in response.text
+    page = response.json()
+    assert page["tracks"][0]["id"] == "123" and page["tracks"][0]["playable"]
+    assert not page["tracks"][1]["playable"]
+    assert music.validate_track("apple", page["session"], "123")["duration_ms"] == 180000
+    assert client.get("/api/music/apple/tracks", headers={"X-Music-Session": page["session"]}).status_code == 200
+
+
+def test_spotify_matching_prefers_correct_duration_over_first_result(client, monkeypatch):
+    handle = music._store("spotify", "private-token")
+    music.SESSIONS[handle].imported["a" * 22] = {
+        "id": "a" * 22, "title": "Song", "artist": "Artist", "playable": True,
+        "duration_ms": 180000,
+    }
+    monkeypatch.setattr(music, "_extract", lambda *args, **kwargs: {"entries": [
+        {"id": "longvid1234", "title": "Artist Song extended", "duration": 420},
+        {"id": "shortid1234", "title": "Artist Song", "duration": 180},
+    ]})
+    response = client.post("/api/music/spotify/resolve", json={"session": handle, "track_id": "a" * 22})
+    assert response.status_code == 200
+    assert response.json()["track_id"] == "shortid1234"
+
+
+@pytest.mark.parametrize("stale", [False, True])
+def test_only_host_can_replace_guest_spotify_source(client, monkeypatch, stale):
+    from app.api.lobby import LOBBIES, Lobby, QueueItem
+
+    lobby = Lobby(host_token="host-secret")
+    item = QueueItem("item", "spotify_" + "a" * 22, "guest", provider_session="private-handle")
+    lobby.queue_items.append(item)
+    LOBBIES["alternative-test"] = lobby
+
+    async def resolve(body, request):
+        assert body.session == "private-handle"
+        if stale:
+            lobby.playback_revision += 1
+        return {"track_id": "shortid1234", "title": "Song — Artist", "matched_title": "Artist Song",
+                "canonical_url": "https://www.youtube.com/watch?v=shortid1234"}
+
+    monkeypatch.setattr(music, "spotify_resolve", resolve)
+    try:
+        path = "/api/music/queue/alternative-test/item/youtube"
+        assert client.post(path).status_code == 403
+        response = client.post(path, headers={"X-Host-Token": "host-secret"})
+        if stale:
+            assert response.status_code == 409
+            assert item.track_id.startswith("spotify_")
+            return
+        assert response.status_code == 200
+        assert item.track_id == "shortid1234" and item.owner_id == "guest"
+        assert item.provider_session is None and lobby.playback_revision == 1
+        assert "private-handle" not in response.text
+    finally:
+        LOBBIES.pop("alternative-test", None)
+
+
 def test_vk_login_route_is_not_shadowed(client):
     response = client.post("/api/music/vk/login", json={"token": "x" * 30})
     assert response.status_code == 503

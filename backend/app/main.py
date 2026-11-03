@@ -29,7 +29,7 @@ from app.api.healthcheck import router as healthcheck_router
 from app.api.lobby import LOBBIES, listener_lobby, telegram_polling_loop
 from app.api.lobby import router as lobby_router
 from app.providers.music import router as music_router
-from app.settings import Settings
+from app.settings import MAX_TRACK_SECONDS, Settings
 
 settings = Settings()
 
@@ -66,6 +66,7 @@ class YouTubeAudio:
     expires_at: float
     proxy: str | None
     headers: dict[str, str] = field(default_factory=dict)
+    duration: float = 0
 
 
 YOUTUBE_AUDIO_CACHE: dict[str, YouTubeAudio] = {}
@@ -98,6 +99,14 @@ def extract_youtube_audio(video_id: str, proxy: str | None = None) -> tuple[str,
         options["cookiefile"] = str(settings.youtube_cookies_file)
     with YoutubeDL(options) as youtube:
         info = youtube.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
+    duration = info.get("duration") if isinstance(info, dict) else None
+    if isinstance(info, dict) and (info.get("is_live") or info.get("live_status") == "is_live"):
+        raise HTTPException(422, "Прямые эфиры нельзя добавлять в музыкальную очередь")
+    if type(duration) in (int, float) and duration > MAX_TRACK_SECONDS:
+        if len(YOUTUBE_DURATION_CACHE) >= 512:
+            YOUTUBE_DURATION_CACHE.pop(next(iter(YOUTUBE_DURATION_CACHE)))
+        YOUTUBE_DURATION_CACHE[video_id] = float(duration)
+        raise HTTPException(422, "Трек длиннее 12 минут — выберите более короткую запись")
     url = info.get("url") if isinstance(info, dict) else None
     parsed = urlparse(url) if isinstance(url, str) else None
     if (
@@ -181,11 +190,17 @@ async def youtube_audio_url(video_id: str) -> YouTubeAudio:
                                 raise ValueError("Audio unavailable on this route")
                         finally:
                             await probe.aclose()
-                except (DownloadError, TimeoutError, ValueError, httpx.HTTPError, HTTPException):
+                except HTTPException as exc:
+                    if exc.status_code == 422:
+                        raise
+                    YOUTUBE_ROUTE_HEALTH[proxy] = (monotonic() + 60, 30)
+                    continue
+                except (DownloadError, TimeoutError, ValueError, httpx.HTTPError):
                     YOUTUBE_ROUTE_HEALTH[proxy] = (monotonic() + 60, 30)
                     continue
                 YOUTUBE_ROUTE_HEALTH[proxy] = (0, monotonic() - started)
-                source = YouTubeAudio(url, expiry, proxy, headers)
+                source = YouTubeAudio(url, expiry, proxy, headers,
+                                      YOUTUBE_DURATION_CACHE.get(video_id, 0))
                 if len(YOUTUBE_AUDIO_CACHE) >= 512:
                     YOUTUBE_AUDIO_CACHE.pop(next(iter(YOUTUBE_AUDIO_CACHE)))
                 YOUTUBE_AUDIO_CACHE[video_id] = source
@@ -210,7 +225,9 @@ async def prepare_youtube_audio(
         raise HTTPException(status_code=403, detail="Доступно только хосту комнаты")
     if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
         raise HTTPException(status_code=400, detail="Некорректный Video ID")
-    await youtube_audio_url(video_id)
+    source = await youtube_audio_url(video_id)
+    if source.duration > MAX_TRACK_SECONDS:
+        raise HTTPException(422, "Трек длиннее 12 минут")
     now = monotonic()
     for key, (_, expiry) in list(YOUTUBE_AUDIO_TICKETS.items()):
         if expiry <= now:
@@ -219,7 +236,9 @@ async def prepare_youtube_audio(
         YOUTUBE_AUDIO_TICKETS.pop(next(iter(YOUTUBE_AUDIO_TICKETS)))
     ticket = secrets.token_urlsafe(24)
     YOUTUBE_AUDIO_TICKETS[ticket] = (video_id, now + 7200)
-    return {"url": f"/api/youtube/audio/file/{ticket}", "duration": YOUTUBE_DURATION_CACHE.get(video_id)}
+    return {"url": f"/api/youtube/audio/file/{ticket}",
+            "duration": source.duration or YOUTUBE_DURATION_CACHE.get(video_id),
+            "max_duration": MAX_TRACK_SECONDS}
 
 
 @app.get("/api/youtube/audio/file/{ticket}")
@@ -232,6 +251,8 @@ async def stream_youtube_audio(ticket: str, request: Request) -> StreamingRespon
     if byte_range and not re.fullmatch(r"bytes=\d*-\d*", byte_range):
         raise HTTPException(status_code=416, detail="Некорректный диапазон")
     source = await youtube_audio_url(video_id)
+    if source.duration > MAX_TRACK_SECONDS:
+        raise HTTPException(422, "Трек длиннее 12 минут")
     client = httpx.AsyncClient(proxy=source.proxy, headers=source.headers, trust_env=False,
                                timeout=httpx.Timeout(15, read=60), follow_redirects=False)
 
@@ -455,6 +476,7 @@ class YandexTrackResponse(BaseModel):
     artist: str
     playable: bool = True
     reason: str = ""
+    duration_ms: int = 0
 
 
 class YandexTracksResponse(BaseModel):
@@ -487,6 +509,9 @@ def liked_page(client: Any, offset: int) -> YandexTracksResponse:
             continue
         catalog_id = re.fullmatch(r"([0-9]{1,20})(?::[0-9]{1,20})?", raw_id)
         playable = catalog_id is not None
+        duration_ms = getattr(track, "duration_ms", 0) or 0
+        too_long = type(duration_ms) is int and duration_ms > MAX_TRACK_SECONDS * 1000
+        playable = playable and not too_long
         metadata = getattr(track, "meta_data", None)
         title = getattr(track, "title", None) or getattr(metadata, "title", None)
         artists = [getattr(artist, "name", None) for artist in getattr(track, "artists", None) or []]
@@ -497,7 +522,9 @@ def liked_page(client: Any, offset: int) -> YandexTracksResponse:
             title=title.strip() if isinstance(title, str) and title.strip() else "Без названия",
             artist=artist or (fallback_artist.strip() if isinstance(fallback_artist, str) and fallback_artist.strip() else "Неизвестный исполнитель"),
             playable=playable,
-            reason="" if playable else "Этот тип записи Яндекса пока не поддерживается плеером",
+            reason="Трек длиннее 12 минут" if too_long else "" if playable else
+            "Этот тип записи Яндекса пока не поддерживается плеером",
+            duration_ms=duration_ms if type(duration_ms) is int else 0,
         ))
     unsupported = sum(not track.playable for track in normalized) + missing
     if unsupported:
@@ -548,7 +575,7 @@ def more_yandex_tracks(
 
 
 @app.get("/api/yandex/stream/{track_id}")
-def yandex_stream(track_id: str, x_yandex_session: str = Header(default="")) -> dict[str, str]:
+def yandex_stream(track_id: str, x_yandex_session: str = Header(default="")) -> dict[str, Any]:
     if not re.fullmatch(r"[0-9]{1,20}", track_id):
         raise HTTPException(status_code=400, detail="Некорректный ID трека")
     client = yandex_session(x_yandex_session)
@@ -556,6 +583,9 @@ def yandex_stream(track_id: str, x_yandex_session: str = Header(default="")) -> 
         tracks = client.tracks([track_id], timeout=10)
         if not tracks:
             raise HTTPException(status_code=404, detail="Трек не найден")
+        duration = getattr(tracks[0], "duration_ms", 0)
+        if type(duration) is int and duration > MAX_TRACK_SECONDS * 1000:
+            raise HTTPException(422, "Трек длиннее 12 минут")
         variants = tracks[0].get_download_info(timeout=10)
         mp3 = [
             variant for variant in variants or [] if variant.codec == "mp3" and not variant.preview
@@ -566,7 +596,8 @@ def yandex_stream(track_id: str, x_yandex_session: str = Header(default="")) -> 
                 detail="Полный MP3 недоступен для этого аккаунта Яндекс Музыки",
             )
         selected = max(mp3, key=lambda variant: variant.bitrate_in_kbps)
-        return {"url": selected.get_direct_link(timeout=10)}
+        return {"url": selected.get_direct_link(timeout=10),
+                **({"duration": duration / 1000} if type(duration) is int and duration > 0 else {})}
     except HTTPException:
         raise
     except UnauthorizedError:
@@ -580,7 +611,7 @@ def yandex_stream(track_id: str, x_yandex_session: str = Header(default="")) -> 
 @app.get("/api/yandex/queue/{lobby_id}/{queue_item_id}/stream")
 def yandex_queue_stream(
     lobby_id: str, queue_item_id: str, x_host_token: str = Header(default="")
-) -> dict[str, str]:
+) -> dict[str, Any]:
     lobby = LOBBIES.get(lobby_id)
     if lobby is None:
         raise HTTPException(status_code=404, detail="Комната не найдена")
@@ -627,8 +658,8 @@ async def listener_stream(
             if item.track_id.startswith(("sc_", "vk_")):
                 from app.providers.music import queue_stream
                 return await queue_stream(lobby_id, item_id, lobby.host_token)
-            if item.track_id.startswith("spotify_"):
-                raise HTTPException(422, "Spotify воспроизводится в личном браузерном плеере")
+            if item.track_id.startswith(("spotify_", "apple_")):
+                raise HTTPException(422, "Оригинал воспроизводится в личном браузерном плеере сервиса")
             return await prepare_youtube_audio(item.track_id, lobby_id, lobby.host_token)
 
         cached = (now + 60, asyncio.create_task(resolve()))

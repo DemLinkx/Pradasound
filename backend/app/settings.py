@@ -2,6 +2,8 @@ from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+MAX_TRACK_SECONDS = 12 * 60
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -28,6 +30,8 @@ class Settings(BaseSettings):
     vk_public_client_id: str = "2685278"
     vk_audio_user_agent: str = ""
     telegram_bot_token: str = ""
+    telegram_bot_username: str = "pradasound_bot"
+    apple_music_developer_token: str = ""
     telegram_webhook_secret: str = ""
     telegram_mini_app_url: str = ""
     telegram_proxy_url: str = ""
