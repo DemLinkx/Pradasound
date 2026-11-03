@@ -559,10 +559,73 @@ export default function App() {
   const [appleAuthorized, setAppleAuthorized] = useState(false);
   const [appleLoginReady, setAppleLoginReady] = useState(false);
   const [resolvingAlternative, setResolvingAlternative] = useState(false);
+  const [captureProbe, setCaptureProbe] = useState({ active: false, pending: false, level: 0, heard: false, message: '' });
+  const captureProbeCleanup = useRef<(() => void) | null>(null);
+  const captureProbeRun = useRef(0);
   const appleCommands = useRef<Promise<unknown>>(Promise.resolve());
   const preparedAudio = useRef(new Map<string, { promise: Promise<string>; expiresAt: number }>());
   const audioRetryKey = useRef('');
   const retryCount = useRef(0);
+
+  function stopCaptureProbe() {
+    captureProbeRun.current++;
+    captureProbeCleanup.current?.(); captureProbeCleanup.current = null;
+    setCaptureProbe((old) => ({ ...old, active: false, pending: false, level: 0 }));
+  }
+
+  async function startCaptureProbe() {
+    if (!navigator.mediaDevices?.getDisplayMedia) {
+      setCaptureProbe({ active: false, pending: false, level: 0, heard: false, message: 'Проверка требует Chrome или Edge на компьютере и HTTPS.' }); return;
+    }
+    stopCaptureProbe();
+    const run = ++captureProbeRun.current;
+    setCaptureProbe({ active: false, pending: true, level: 0, heard: false, message: 'Выберите вкладку с играющей музыкой и включите «Поделиться аудио вкладки».' });
+    let stream: MediaStream | null = null;
+    let context: AudioContext | null = null;
+    let timer: ReturnType<typeof setInterval> | undefined;
+    let expiry: ReturnType<typeof setTimeout> | undefined;
+    const cleanup = () => {
+      if (timer) clearInterval(timer); if (expiry) clearTimeout(expiry);
+      stream?.getTracks().forEach((track) => track.stop());
+      if (context) void context.close().catch(() => {});
+    };
+    try {
+      stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 1 }, audio: true });
+      if (run !== captureProbeRun.current) { cleanup(); return; }
+      const audio = stream.getAudioTracks()[0];
+      if (!audio) throw new Error('Браузер не передал звук. Выберите именно вкладку и включите передачу её аудио.');
+      context = new AudioContext();
+      const source = context.createMediaStreamSource(new MediaStream([audio]));
+      const analyser = context.createAnalyser(); analyser.fftSize = 1024;
+      const silent = context.createGain(); silent.gain.value = 0;
+      source.connect(analyser); analyser.connect(silent); silent.connect(context.destination);
+      await context.resume();
+      if (run !== captureProbeRun.current) { cleanup(); return; }
+      captureProbeCleanup.current = cleanup;
+      const samples = new Float32Array(analyser.fftSize);
+      let heard = false;
+      const started = performance.now();
+      setCaptureProbe({ active: true, pending: false, level: 0, heard: false, message: 'Проверяем доступ к звуку. Музыка должна играть в выбранной вкладке.' });
+      timer = setInterval(() => {
+        if (run !== captureProbeRun.current) return;
+        analyser.getFloatTimeDomainData(samples);
+        const peak = samples.reduce((maximum, sample) => Math.max(maximum, Math.abs(sample)), 0);
+        heard ||= peak > .001;
+        setCaptureProbe({ active: true, pending: false, level: Math.min(1, peak * 4), heard,
+          message: heard ? 'Звуковой сигнал доступен. Следующий шаг — проверить передачу на второе устройство.' : performance.now() - started > 7000 ?
+            'Пока тишина. Если Spotify слышно, проверьте выбранную вкладку и передачу аудио. Защищённый звук браузер может не отдавать.' : 'Слушаем выбранную вкладку…' });
+      }, 120);
+      const finish = () => { if (run === captureProbeRun.current) stopCaptureProbe(); };
+      stream.getTracks().forEach((track) => track.addEventListener('ended', finish, { once: true }));
+      expiry = setTimeout(finish, 30000);
+    } catch (cause) {
+      cleanup();
+      if (run === captureProbeRun.current) setCaptureProbe({ active: false, pending: false, level: 0, heard: false,
+        message: cause instanceof DOMException && cause.name === 'NotAllowedError' ? 'Захват отменён или запрещён браузером.' : cause instanceof Error ? cause.message : 'Не удалось проверить звук.' });
+    }
+  }
+
+  useEffect(() => () => { captureProbeRun.current++; captureProbeCleanup.current?.(); captureProbeCleanup.current = null; }, [session?.lobby_id]);
   const lastRoom = useRef('');
   const draggingItem = useRef('');
 
@@ -2262,6 +2325,13 @@ export default function App() {
               </form>
             </>}
             {musicProvider === 'spotify' && <label className="music-consent"><input type="checkbox" checked={spotifyConsent} onChange={(event) => setSpotifyConsent(event.target.checked)} />Добавлять через YouTube вместо Spotify — разрешаю подбор другой записи</label>}
+            {musicProvider === 'spotify' && <details style={{ marginTop: 18 }}><summary>Передача звука · экспериментальная проверка</summary>
+              <p className="muted small">На компьютере запустите оригинал Spotify, нажмите кнопку и выберите вкладку, в которой он играет. Включите «Поделиться аудио вкладки». Для проверки подходит также отдельная вкладка Spotify.</p>
+              <p className="muted small">Проверка длится до 30 секунд. Звук и изображение остаются на вашем устройстве; запись и передача гостям пока не выполняются. Пароли и токены Spotify не нужны.</p>
+              <button className="button tiny" disabled={captureProbe.pending} onClick={() => captureProbe.active ? stopCaptureProbe() : void startCaptureProbe()}>{captureProbe.pending ? 'Выберите вкладку…' : captureProbe.active ? 'Остановить проверку' : 'Проверить доступ к звуку'}</button>
+              {(captureProbe.active || captureProbe.heard) && <div style={{ marginTop: 12 }}><meter aria-label="Уровень захваченного звука" min={0} max={1} value={captureProbe.level} style={{ width: '100%', accentColor: '#f68b35' }} />{captureProbe.heard && <p className="muted small">Сигнал обнаружен</p>}</div>}
+              {captureProbe.message && <p className="muted small" role="status">{captureProbe.message}</p>}
+            </details>}
             {musicBusy && <p className="muted small" role="status">{musicDeviceLogin ? 'Ждём подтверждения Spotify…' : 'Загружаем музыку…'}</p>}
             {musicError && <p className="notice" role="alert">{musicError}</p>}
             {musicCooldown > 0 && <p className="muted small" role="status">Повторный запрос станет доступен через {musicCooldown >= 3600 ? `${Math.ceil(musicCooldown / 3600)} ч` : musicCooldown >= 60 ? `${Math.ceil(musicCooldown / 60)} мин` : `${musicCooldown} с`}. Повторный вход не ускоряет ожидание.{musicProvider === 'spotify' && ' Публичный плейлист можно импортировать отдельно выше.'}</p>}
