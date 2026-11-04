@@ -202,6 +202,12 @@ class QueueItem:
     provider_session: str | None = None
     canonical_url: str | None = None
     duration_ms: int = 0
+    added_order: int = 0
+    votes: dict[str, int] = field(default_factory=dict)
+
+    @property
+    def rating(self) -> int:
+        return sum(self.votes.values())
 
 
 @dataclass
@@ -233,6 +239,10 @@ class Lobby:
     relay_active: bool = False
     relay_requests: set[str] = field(default_factory=set)
     relay_listeners: set[str] = field(default_factory=set)
+
+
+def rank_queue(lobby: Lobby) -> None:
+    lobby.queue_items[1:] = sorted(lobby.queue_items[1:], key=lambda item: (-item.rating, item.added_order))
 
 
 LOBBIES: dict[str, Lobby] = {}
@@ -404,7 +414,9 @@ class ConnectionManager:
                 "tracks_queue": [item.track_id for item in lobby.queue_items],
                 "queue_items": [
                     {"id": item.id, "track_id": item.track_id, "owner_id": item.owner_id,
-                     "access_revision": item.access_revision,
+                     "access_revision": item.access_revision, "rating": item.rating,
+                     "likes": sum(v == 1 for v in item.votes.values()),
+                     "dislikes": sum(v == -1 for v in item.votes.values()),
                      **({"duration_ms": item.duration_ms} if item.duration_ms else {}),
                      **({"canonical_url": item.canonical_url} if item.canonical_url else {})}
                     for item in lobby.queue_items
@@ -428,7 +440,9 @@ class ConnectionManager:
                     for member_id, _ in clients
                 ],
             }
-            sent = await asyncio.gather(*(self.send(ws, state) for _, ws in clients))
+            sent = await asyncio.gather(*(self.send(ws, {**state, "my_votes": {
+                item.id: item.votes[owner] for item in lobby.queue_items if owner in item.votes
+            }}) for mid, ws in clients for owner in [lobby.member_owners.get(mid, "")]))
             failed = [member_id for (member_id, _), success in zip(clients, sent) if not success]
             if not failed:
                 return
@@ -814,7 +828,9 @@ async def lobby_ws(ws: WebSocket, lobby_id: str) -> None:
                         duration_ms = value
                 lobby.queue_items.append(QueueItem(uuid4().hex, track_id, owner_id, yandex_handle,
                                                    provider_session=provider_handle,
-                                                   canonical_url=canonical_url, duration_ms=duration_ms))
+                                                   canonical_url=canonical_url, duration_ms=duration_ms,
+                                                   added_order=lobby.queue_revision))
+                rank_queue(lobby)
                 lobby.queue_revision += 1
                 title = provider_title or message.get("title")
                 if (
@@ -822,6 +838,18 @@ async def lobby_ws(ws: WebSocket, lobby_id: str) -> None:
                     and 0 < len(title) <= 200
                 ):
                     lobby.track_titles[track_id] = title
+            elif message.get("action") == "vote_track":
+                value = message.get("vote")
+                item = next((item for item in lobby.queue_items if item.id == message.get("item_id")), None)
+                if item is None or type(value) is not int or value not in (-1, 0, 1):
+                    await manager.send(ws, {"type": "error", "error": "invalid_track_vote"})
+                    continue
+                if value:
+                    item.votes[owner_id] = value
+                else:
+                    item.votes.pop(owner_id, None)
+                rank_queue(lobby)
+                lobby.queue_revision += 1
             elif message.get("action") == "set_yandex_session":
                 yandex_handle = message.get("yandex_session")
                 if not isinstance(yandex_handle, str) or not re.fullmatch(

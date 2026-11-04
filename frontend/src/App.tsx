@@ -42,13 +42,28 @@ function drawerSwipe(dx: number, dy: number, open: 'queue' | 'library' | null): 
   return dx < 0 ? 'library' : 'queue';
 }
 
-function SwipeTrack({ children, onRight, onLeft, rightLabel = 'В очередь', leftLabel = 'Удалить', leftDestructive = true, ...props }:
-  HTMLAttributes<HTMLLIElement> & { children: ReactNode; onRight?: () => void; onLeft?: () => void; rightLabel?: string; leftLabel?: string; leftDestructive?: boolean }) {
+function queueVoteTap(state: { count: number; at: number; timer: number }, now: number, vote: (value: 1 | -1) => void) {
+  state.count = now - state.at < 320 ? state.count + 1 : 1; state.at = now;
+  window.clearTimeout(state.timer);
+  if (state.count === 3) { state.count = 0; vote(-1); }
+  else state.timer = window.setTimeout(() => { if (state.count === 2) vote(1); state.count = 0; }, 320);
+}
+
+function SwipeTrack({ children, onRight, onLeft, onVote, rightLabel = 'В очередь', leftLabel = 'Удалить', leftDestructive = true, ...props }:
+  HTMLAttributes<HTMLLIElement> & { children: ReactNode; onVote?: (vote: 1 | -1) => void; onRight?: () => void; onLeft?: () => void; rightLabel?: string; leftLabel?: string; leftDestructive?: boolean }) {
   const gesture = useRef<{ x: number; y: number; locked: boolean; dx: number } | null>(null);
   const [offset, setOffset] = useState(0);
+  const taps = useRef({ count: 0, at: 0, timer: 0 });
+  const voteCallback = useRef(onVote); voteCallback.current = onVote;
+  useEffect(() => () => window.clearTimeout(taps.current.timer), []);
   const end = (event: ReactPointerEvent<HTMLLIElement>, cancel = false) => {
     const drag = gesture.current; gesture.current = null; setOffset(0);
-    if (!drag?.locked) return;
+    if (!drag?.locked) {
+      if (cancel || !drag || !onVote || Math.hypot(event.clientX - drag.x, event.clientY - drag.y) > 10) return;
+      queueVoteTap(taps.current, performance.now(), (value) => voteCallback.current?.(value));
+      return;
+    }
+    window.clearTimeout(taps.current.timer); taps.current.count = 0;
     event.stopPropagation();
     if (!cancel && Math.abs(drag.dx) >= 72) { if (drag.dx > 0) onRight?.(); else onLeft?.(); }
   };
@@ -63,6 +78,7 @@ function SwipeTrack({ children, onRight, onLeft, rightLabel = 'В очередь
     onPointerMove={(event) => {
       const drag = gesture.current; if (!drag) return;
       const dx = event.clientX - drag.x, dy = event.clientY - drag.y;
+      if (Math.abs(dx) > 10 || Math.abs(dy) > 10) { window.clearTimeout(taps.current.timer); taps.current.count = 0; }
       if (!drag.locked && Math.abs(dy) > 10 && Math.abs(dy) >= Math.abs(dx)) { gesture.current = null; return; }
       if (!drag.locked && Math.abs(dx) > 10 && Math.abs(dx) > Math.abs(dy) * 1.25) {
         drag.locked = true; event.currentTarget.setPointerCapture(event.pointerId);
@@ -106,7 +122,7 @@ function yandexPage(value: unknown) {
   };
 }
 type YandexLogin = { login_id: string; verification_url: string; user_code: string; interval: number; expires_in: number };
-type QueueItem = { id: string; track_id: string; owner_id: string; access_revision?: number; canonical_url?: string; duration_ms?: number };
+type QueueItem = { rating?: number; likes?: number; dislikes?: number; id: string; track_id: string; owner_id: string; access_revision?: number; canonical_url?: string; duration_ms?: number };
 type PlaybackSync = { item_id: string; revision: number; position: number; duration: number; paused: boolean; server_time: number; serial: number; transport_serial?: number };
 function playbackSnapshot(value: unknown): PlaybackSync | null {
   if (!value || typeof value !== 'object') return null;
@@ -440,6 +456,8 @@ const STYLES = `
     html,body{overscroll-behavior-x:none}.app{touch-action:pan-y pinch-zoom;overscroll-behavior-x:none}.edge-swipe-zone{position:fixed;top:0;bottom:0;width:36px;z-index:64;touch-action:pan-y}.edge-swipe-left{left:0}.edge-swipe-right{right:0}
     .mobile-only{display:block}.drawer-scrim{display:block;position:fixed;inset:0;z-index:70;padding:0;border:0;background:#03050b9c;backdrop-filter:blur(7px);opacity:0;pointer-events:none;transition:opacity .3s}.drawer-scrim.visible{opacity:1;pointer-events:auto}.drawer{position:fixed;top:0;bottom:0;width:calc(100% - 24px);max-width:510px;z-index:80;background:linear-gradient(155deg,#1b1f28fa,#101218fc);border:1px solid #ffffff18;box-shadow:0 0 80px #000b;display:flex;flex-direction:column;gap:0;visibility:hidden;transition:transform .34s cubic-bezier(.2,.8,.2,1),visibility .34s;will-change:transform;padding-top:env(safe-area-inset-top,0px)}.queue-drawer{left:0;border-radius:0 26px 26px 0;transform:translateX(calc(-100% - 20px))}.library-drawer{right:0;border-radius:26px 0 0 26px;transform:translateX(calc(100% + 20px))}.drawer.is-open{transform:translateX(0);visibility:visible}.drawer-header{padding:26px 20px 18px;flex-shrink:0;touch-action:pan-y}.drawer-header h2{font-size:29px;line-height:1.12;letter-spacing:-.055em}.drawer-header .eyebrow{font-size:9px}.drawer-close{width:34px;height:34px;flex:none;display:grid;place-items:center;border:1px solid #ffffff1a;background:#ffffff07;border-radius:50%;font-size:23px;font-weight:300;line-height:1;color:#d5dae3}.drawer>.library-progress,.drawer>.notice{margin:0 20px 12px}.drawer>.swipe-hint{padding:0 20px;margin:0 0 16px}.drawer-body{overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;padding:0 16px calc(24px + env(safe-area-inset-bottom,0px));flex:1;min-height:0}.drawer-body>.card{border:0;border-radius:0;background:none;box-shadow:none;backdrop-filter:none;padding:0}.library-tabs{margin:0 16px 12px;flex-shrink:0;border-radius:16px;gap:4px}.library-tabs button{padding:12px 2px;font-size:10px}.library-drawer .sectionhead,.queue-card>.sectionhead{display:none}.library-drawer .likes{max-height:none;overflow:visible;margin-top:10px;gap:8px}.library-drawer .likes .swipe-content{padding:16px 14px}.library-drawer .likes .trackmeta strong{font-size:15px;font-weight:750}.library-drawer .likes .trackmeta small{font-size:12px}.drawer .queueControls,.drawer .track-action,.drawer .load-more,.stage-add{display:none!important}.queue .swipe-content{padding:16px 11px;grid-template-columns:18px minmax(0,1fr) 40px;gap:10px}.queue .added-by{width:40px}.queue .trackmeta strong{font-size:15px}.queue .trackmeta small{font-size:12px}.queue .index{font-size:11px}.edge-handle{position:fixed;top:48%;z-index:65;width:23px;height:132px;border:1px solid #f1a46c47;background:linear-gradient(180deg,#292a32ee,#151822f5);backdrop-filter:blur(15px);box-shadow:0 5px 25px #0006;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:9px;padding:9px 0;color:#f2ae78;touch-action:pan-y}.edge-handle span{writing-mode:vertical-rl;font-size:10px;font-weight:650;letter-spacing:.08em}.edge-handle i{font-style:normal;font-size:10px}.edge-left{left:0;border-radius:0 12px 12px 0;border-left:0}.edge-right{right:0;border-radius:12px 0 0 12px;border-right:0}.edge-left span{transform:rotate(180deg)}.sidecol{gap:0}.roomhead .actions{gap:8px}.roomhead .actions .button{font-size:12px;padding:9px 12px}.roomhead{margin-bottom:18px}.share-card{margin-top:2px}.hostcard{padding:17px!important}.hostcard .eyebrow{font-size:9px}.shell{padding-bottom:30px}.library-vk{font-size:10px}.drawer .authbox{padding:14px}.drawer .code{font-size:25px}.drawer .button.primary{font-size:14px;padding:13px 16px}.drawer .music-import{gap:14px}.drawer .music-consent{font-size:12px}.drawer .field{font-size:12px}.drawer .library-search input{padding:14px 13px}.drawer .library-search{font-size:11px;color:#a8b0be}.drawer .notice{font-size:12px}.drawer .small{font-size:12px;line-height:1.5}.drawer .added-by .avatar{flex:none}.queue .swipe-row.current .swipe-content{background:#44332af2}
   }
+  .track-rating{display:flex;flex-wrap:wrap;gap:4px 10px;margin-top:7px;font-size:10px;color:#b9c0cc}.track-rating b{font-weight:650}.track-rating.liked b{color:#ffad70}.track-rating.disliked b{color:#f19088}.vote-controls{grid-column:2 / 4;display:flex;gap:6px;justify-content:flex-end}.vote-controls .button{padding:5px 10px;font-size:12px}.vote-controls .button[aria-pressed=true]{background:#fa8b36;color:#17100b;border-color:#fa8b36}.queueControls{grid-row:3}.queue .track-action{grid-row:3}
+  @media(max-width:850px){.vote-controls{display:none}.queue.swipe-row,.queue .swipe-content{touch-action:pan-y}.track-rating{font-size:10px;gap:4px 8px}}
   @media(prefers-reduced-motion:reduce){.drawer,.drawer-scrim,.swipe-content,.library-progress>span{transition:none;animation:none}}
 
 `;
@@ -478,6 +496,7 @@ export default function App() {
   const [roomId, setRoomId] = useState('');
   const [trackId, setTrackId] = useState('');
   const [queueItems, setQueueItems] = useState<QueueItem[]>([]);
+  const [myVotes, setMyVotes] = useState<Record<string, number>>({});
   const tracksQueue = useMemo(() => queueItems.map((item) => item.track_id), [queueItems]);
   const [ownerId, setOwnerId] = useState('');
   const [profiles, setProfiles] = useState<Record<string, Profile>>({});
@@ -949,6 +968,7 @@ export default function App() {
             'queue_revision' in message && typeof message.queue_revision === 'number' &&
             Number.isSafeInteger(message.queue_revision) && message.queue_revision >= 0) {
           setQueueItems(message.queue_items as QueueItem[]);
+          setMyVotes('my_votes' in message && message.my_votes && typeof message.my_votes === 'object' ? message.my_votes as Record<string, number> : {});
           if ('relay' in message && message.relay && typeof message.relay === 'object') {
             const next = message.relay as RelayState;
             if (Number.isSafeInteger(next.generation) && Array.isArray(next.requests) && Array.isArray(next.listeners) &&
@@ -2053,6 +2073,12 @@ export default function App() {
     publishHostPlayback(target);
   }
 
+  function voteTrack(itemId: string, vote: 1 | -1) {
+    const ws = socket.current;
+    if (status !== 'connected' || ws?.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({ action: 'vote_track', item_id: itemId, vote: myVotes[itemId] === vote ? 0 : vote }));
+  }
+
   function changeQueue(action: 'remove_track' | 'move_track', itemId: string, toIndex?: number) {
     const ws = socket.current;
     if (status !== 'connected' || ws?.readyState !== WebSocket.OPEN || queueActionPending) return;
@@ -2443,9 +2469,9 @@ export default function App() {
       </div><div className="sidecol">
         <aside className={`drawer queue-drawer ${drawer === 'queue' ? 'is-open' : ''}`} inert={isMobile && drawer !== 'queue'} aria-hidden={isMobile && drawer !== 'queue'} role={isMobile ? 'dialog' : undefined} aria-modal={isMobile && drawer === 'queue' ? true : undefined} aria-label="Общая очередь">
           <header className="drawer-header"><div><span className="eyebrow">В ОДНОМ РИТМЕ</span><h2>Общая очередь</h2></div><button className="drawer-close mobile-only" aria-label="Закрыть панель" onClick={() => setDrawer(null)}>×</button></header>
-          <p className="mobile-only swipe-hint">← {session.role === 'Main' ? 'Удалить трек · → Играть следующим' : 'Удалить свой трек'}</p>
+          <p className="mobile-only swipe-hint">← {session.role === 'Main' ? 'Удалить трек · → Играть следующим' : 'Удалить свой трек'} · 2 тапа — лайк · 3 — дизлайк</p>
           <div className="drawer-body">        <section className="card cardpad queue-card"><div className="sectionhead"><div><span className="eyebrow">ОБЩИЙ РИТМ</span><h3>Очередь треков</h3></div><span className="pill">{queueItems.length} треков</span></div>
-          <div aria-live="polite">{queueItems.length ? <ol className="queue">{queueItems.map((item, index) => <SwipeTrack onLeft={status === 'connected' && !queueActionPending && (session.role === 'Main' || item.owner_id === ownerId) ? () => changeQueue('remove_track', item.id) : undefined} onRight={status === 'connected' && !queueActionPending && session.role === 'Main' && index > 1 ? () => changeQueue('move_track', item.id, 1) : undefined} rightLabel="Следующим" className={index === 0 ? 'current' : ''} key={item.id}
+          <div aria-live="polite">{queueItems.length ? <ol className="queue">{queueItems.map((item, index) => <SwipeTrack onVote={(vote) => voteTrack(item.id, vote)} onLeft={status === 'connected' && !queueActionPending && (session.role === 'Main' || item.owner_id === ownerId) ? () => changeQueue('remove_track', item.id) : undefined} onRight={status === 'connected' && !queueActionPending && session.role === 'Main' && index > 1 ? () => changeQueue('move_track', item.id, 1) : undefined} rightLabel="Следующим" className={index === 0 ? 'current' : ''} key={item.id}
             draggable={!isMobile && session.role === 'Main' && index > 0 && status === 'connected' && !queueActionPending}
             onDragStart={(event) => { draggingItem.current = item.id; event.dataTransfer.effectAllowed = 'move'; }}
             onDragOver={(event) => { if (session.role === 'Main' && index > 0) event.preventDefault(); }}
@@ -2454,9 +2480,18 @@ export default function App() {
             onDragEnd={() => { draggingItem.current = ''; }}>
             <span className="index">{index === 0 ? '♫' : String(index + 1).padStart(2, '0')}</span>
             <div className="trackmeta"><strong>{queueCaption(item).title}</strong>
-              <small>{queueCaption(item).artist}{index === 0 ? ' · Сейчас играет' : ''}</small></div>
+              <small>{queueCaption(item).artist}{index === 0 ? ' · Сейчас играет' : ''}</small>
+              <span className={`track-rating ${myVotes[item.id] === 1 ? 'liked' : myVotes[item.id] === -1 ? 'disliked' : ''}`}>
+                <span>Рейтинг {Number(item.rating || 0) > 0 ? '+' : ''}{item.rating || 0}</span>
+                <span>♥ {item.likes || 0} · ↓ {item.dislikes || 0}</span>
+                {myVotes[item.id] ? <b>{myVotes[item.id] === 1 ? '♥ Ваш лайк' : '↓ Ваш дизлайк'}</b> : null}
+              </span></div>
               <span className="added-by" title={profileLabel(profiles[item.owner_id])}><Avatar profile={profiles[item.owner_id]} size={23} />
                 <span>{item.owner_id === ownerId ? 'Вы' : profileLabel(profiles[item.owner_id])}</span></span>
+            <span className="vote-controls">
+              <button className="button tiny" aria-label="Лайк" aria-pressed={myVotes[item.id] === 1} disabled={status !== 'connected'} onClick={() => voteTrack(item.id, 1)}>♥ {item.likes || 0}</button>
+              <button className="button tiny" aria-label="Дизлайк" aria-pressed={myVotes[item.id] === -1} disabled={status !== 'connected'} onClick={() => voteTrack(item.id, -1)}>↓ {item.dislikes || 0}</button>
+            </span>
             {session.role === 'Main' && index > 0 && <span className="queueControls">
               {index > 1 && <button className="button tiny" disabled={queueActionPending || status !== 'connected'} onClick={() => changeQueue('move_track', item.id, 1)}>Играть следующим</button>}
               <button className="button tiny" aria-label="Поднять трек" title="Поднять" disabled={index <= 1 || queueActionPending || status !== 'connected'} onClick={() => changeQueue('move_track', item.id, index - 1)}>↑</button>

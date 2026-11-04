@@ -256,3 +256,23 @@ test('VK accepts a token, copied assignment, fragment or query without sending U
   assert.throws(() => vkToken(`access_token=${token}&token=${token}`));
   assert.throws(() => vkToken('token='));
 });
+
+
+test('double taps like once; triple taps dislike without first sending a like', () => {
+  const timers = new Map(); let serial = 0;
+  const start = source.indexOf('function queueVoteTap(');
+  const end = source.indexOf('\n}\n', start) + 3;
+  const tap = new Script(`${stripTypeScriptTypes(source.slice(start, end))}; queueVoteTap`).runInNewContext({ window: {
+    clearTimeout: (id) => timers.delete(id),
+    setTimeout: (fn) => { timers.set(++serial, fn); return serial; },
+  } });
+  const flush = () => { const pending = [...timers.values()]; timers.clear(); pending.forEach((fn) => fn()); };
+  const state = { count: 0, at: 0, timer: 0 }, votes = [];
+  const vote = (value) => votes.push(value);
+  tap(state, 1000, vote); flush(); assert.deepEqual(votes, []);
+  tap(state, 2000, vote); tap(state, 2120, vote);
+  assert.deepEqual(votes, []); flush(); assert.deepEqual(votes, [1]);
+  tap(state, 3000, vote); tap(state, 3110, vote); tap(state, 3220, vote); flush();
+  assert.deepEqual(votes, [1, -1]);
+  tap(state, 4000, vote); tap(state, 4500, vote); flush(); assert.deepEqual(votes, [1, -1]);
+});
