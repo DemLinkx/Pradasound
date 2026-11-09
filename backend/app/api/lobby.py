@@ -4,14 +4,18 @@ import hashlib
 import hmac
 import json
 import logging
+import os
+import math
 import re
 import secrets
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from time import monotonic, time
 from urllib.parse import parse_qsl, urlencode, urlparse
 from uuid import uuid4
 
 import httpx
+from cryptography.fernet import Fernet
+
 from fastapi import APIRouter, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
@@ -23,6 +27,11 @@ telegram_bot_token = Settings().telegram_bot_token
 telegram_webhook_secret = Settings().telegram_webhook_secret
 telegram_mini_app_url = Settings().telegram_mini_app_url
 telegram_proxy_url = Settings().telegram_proxy_url
+room_settings = Settings()
+ROOM_DIRTY = 0
+ROOM_SAVED = 0
+ROOM_SAVE_ERROR = False
+
 TELEGRAM_STATUS: dict[str, object] = {"connected": False, "polls": 0}
 
 
@@ -226,6 +235,7 @@ class Lobby:
     connections: dict[str, WebSocket] = field(default_factory=dict)
     last_empty: float = field(default_factory=monotonic)
     ever_shared: bool = False
+    ever_connected: bool = False
     vacated: bool = False
     pending: int = 0
     claim_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -234,6 +244,11 @@ class Lobby:
     playback: dict[str, object] | None = None
     sync_serial: int = 0
     last_sync: float = 0
+    clock_started: float = 0
+    server_offset: float = 0
+    preparing_id: str = ""
+    playback_error: str = ""
+    failed_at: float = 0
     relay_source: str | None = None
     relay_generation: int = 0
     relay_active: bool = False
@@ -246,6 +261,238 @@ def rank_queue(lobby: Lobby) -> None:
 
 
 LOBBIES: dict[str, Lobby] = {}
+
+
+def mark_rooms_dirty() -> None:
+    global ROOM_DIRTY
+    ROOM_DIRTY += 1
+
+
+def room_idle_ttl(lobby: Lobby) -> int:
+    return 900 if lobby.ever_connected or lobby.ever_shared else 30
+
+
+def room_state_cipher() -> Fernet | None:
+    if room_settings.room_state_file is None:
+        return None
+    key = room_settings.room_state_key.get_secret_value()
+    if not key:
+        raise RuntimeError("ROOM_STATE_KEY is required for encrypted room recovery")
+    return Fernet(key.encode())
+
+
+def room_records() -> bytes:
+    now = time()
+    records = {}
+    for lid, room in LOBBIES.items():
+        if is_expired(room):
+            continue
+        records[lid] = {
+            "host_token": room.host_token, "host_telegram_id": room.host_telegram_id,
+            "queue_items": [asdict(item) for item in room.queue_items],
+            "track_titles": room.track_titles, "owner_ids": room.owner_ids, "profiles": room.profiles,
+            "playback_revision": room.playback_revision, "queue_revision": room.queue_revision,
+            "ever_shared": room.ever_shared, "ever_connected": room.ever_connected,
+            "empty_since": None if room.connections else now - (monotonic() - room.last_empty),
+            "playback": playback_snapshot(room), "sync_serial": room.sync_serial,
+        }
+    return json.dumps({"format": 1, "rooms": records}, allow_nan=False, separators=(",", ":")).encode()
+
+
+def write_room_records(payload: bytes) -> None:
+    cipher = room_state_cipher()
+    path = room_settings.room_state_file
+    if cipher is None or path is None:
+        return
+    if len(payload) > 32 * 1024 * 1024:
+        raise RuntimeError("Room recovery data exceeded 32 MiB")
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temporary = path.with_suffix(".tmp")
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(cipher.encrypt(payload))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+async def save_rooms() -> None:
+    global ROOM_SAVED, ROOM_SAVE_ERROR
+    if room_settings.room_state_file is None or ROOM_SAVED == ROOM_DIRTY:
+        return
+    revision, payload = ROOM_DIRTY, room_records()
+    writer = asyncio.create_task(asyncio.to_thread(write_room_records, payload))
+    try:
+        await asyncio.shield(writer)
+    except asyncio.CancelledError:
+        await writer
+        raise
+    except Exception:
+        if not ROOM_SAVE_ERROR:
+            logging.getLogger("uvicorn.error").error("Encrypted room recovery save failed")
+        ROOM_SAVE_ERROR = True
+    else:
+        ROOM_SAVED, ROOM_SAVE_ERROR = revision, False
+
+
+def load_rooms() -> None:
+    cipher = room_state_cipher()
+    path = room_settings.room_state_file
+    if cipher is None or path is None or not path.exists():
+        return
+    if path.stat().st_size > 48 * 1024 * 1024:
+        raise RuntimeError("Room recovery file exceeded limit")
+    try:
+        data = json.loads(cipher.decrypt(path.read_bytes()))
+        if data.get("format") != 1 or not isinstance(data.get("rooms"), dict) or len(data["rooms"]) > 100:
+            raise ValueError("Invalid room recovery format")
+        restored = {}
+        for lid, row in data["rooms"].items():
+            if not re.fullmatch(r"[a-f0-9]{32}", lid) or not isinstance(row.get("host_token"), str):
+                raise ValueError("Invalid recovered room")
+            if not isinstance(row.get("queue_items"), list) or len(row["queue_items"]) > 500:
+                raise ValueError("Invalid recovered queue")
+            room = Lobby(host_token=row["host_token"], host_telegram_id=row.get("host_telegram_id"),
+                         ever_shared=bool(row.get("ever_shared")), ever_connected=bool(row.get("ever_connected")),
+                         vacated=True, playback_revision=int(row.get("playback_revision", 0)),
+                         queue_revision=int(row.get("queue_revision", 0)), sync_serial=int(row.get("sync_serial", 0)))
+            room.queue_items = [QueueItem(**item) for item in row["queue_items"]]
+            room.track_titles, room.owner_ids, room.profiles = row["track_titles"], row["owner_ids"], row["profiles"]
+            empty = row.get("empty_since")
+            if empty is not None and (type(empty) not in (int, float) or not math.isfinite(empty)):
+                raise ValueError("Invalid recovered expiry")
+            room.last_empty = monotonic() - max(0, time() - empty) if empty is not None else monotonic()
+            state = row.get("playback")
+            if state and room.queue_items and state.get("item_id") == room.queue_items[0].id:
+                position = float(state["position"])
+                if not state["paused"]:
+                    position += max(0, time() - float(state["server_time"]) / 1000)
+                room.playback = {**state, "position": min(float(state["duration"]), position), "paused": True, "server_time": time() * 1000}
+                room.clock_started = monotonic()
+            if not is_expired(room):
+                restored[lid] = room
+        LOBBIES.update(restored)
+    except Exception:
+        raise RuntimeError("Encrypted room recovery failed; check the file and key") from None
+
+
+SERVER_PREPARES: dict[str, asyncio.Task] = {}
+
+
+def server_head(lobby: Lobby) -> bool:
+    return bool(room_settings.server_playback_enabled and lobby.queue_items and
+                not lobby.queue_items[0].track_id.startswith(("yandex_", "spotify_", "apple_")))
+
+
+def set_room_clock(lobby: Lobby, position: float, duration: float, paused: bool, *, transport: bool = True) -> None:
+    lobby.sync_serial += 1
+    previous = lobby.playback or {}
+    lobby.playback = {"item_id": lobby.queue_items[0].id, "revision": lobby.playback_revision,
+                      "position": max(0, min(position, duration)), "duration": duration, "paused": paused,
+                      "server_time": time() * 1000, "serial": lobby.sync_serial, "authority": "server",
+                      "transport_serial": lobby.sync_serial if transport else previous.get("transport_serial", lobby.sync_serial)}
+    lobby.clock_started = monotonic()
+    mark_rooms_dirty()
+
+
+def advance_room(lobby: Lobby, *, overlap: float = 0) -> None:
+    removed = lobby.queue_items.pop(0)
+    if not any(item.track_id == removed.track_id for item in lobby.queue_items):
+        lobby.track_titles.pop(removed.track_id, None)
+    lobby.playback_revision += 1
+    lobby.queue_revision += 1
+    lobby.server_offset = overlap
+    lobby.preparing_id = ""
+    lobby.failed_at = 0
+    lobby.playback_error = ""
+    mark_rooms_dirty()
+
+
+async def prepare_room_clock(lid: str, room: Lobby, item: QueueItem, revision: int) -> None:
+    from app.main import room_stream_descriptor
+    room.preparing_id = item.id
+    try:
+        data = await asyncio.wait_for(room_stream_descriptor(lid, item.id), timeout=45)
+        if LOBBIES.get(lid) is not room or not room.queue_items or room.queue_items[0].id != item.id or room.playback_revision != revision:
+            return
+        duration = data.get("duration") or item.duration_ms / 1000
+        if type(duration) not in (int, float) or not math.isfinite(duration) or duration <= 0:
+            raise HTTPException(422, "Источник не сообщил длительность трека")
+        if duration > MAX_TRACK_SECONDS:
+            raise HTTPException(422, "Трек длиннее 12 минут")
+        item.duration_ms = int(duration * 1000)
+        room.playback_error = ""
+        set_room_clock(room, room.server_offset, duration, False)
+        room.server_offset = 0
+        await manager.broadcast(lid)
+    except Exception:
+        if LOBBIES.get(lid) is room and room.queue_items and room.queue_items[0].id == item.id and room.playback_revision == revision:
+            room.failed_at = monotonic()
+            room.playback_error = "Аудио недоступно. Сервер попробует следующий трек через 5 секунд."
+            await manager.broadcast(lid)
+    finally:
+        if room.preparing_id == item.id:
+            room.preparing_id = ""
+
+
+async def server_clock_tick() -> None:
+    for lid, task in list(SERVER_PREPARES.items()):
+        if task.done():
+            if not task.cancelled() and task.exception() is not None:
+                logging.getLogger("uvicorn.error").error("Room audio preparation failed")
+            SERVER_PREPARES.pop(lid, None)
+        elif lid not in LOBBIES or not LOBBIES[lid].queue_items or task.get_name() != f"{LOBBIES[lid].queue_items[0].id}:{LOBBIES[lid].playback_revision}":
+            task.cancel()
+            SERVER_PREPARES.pop(lid, None)
+    for lid, room in list(LOBBIES.items()):
+        if not room.connections or not server_head(room):
+            continue
+        if room.failed_at:
+            if monotonic() - room.failed_at >= 5:
+                advance_room(room)
+                await manager.broadcast(lid)
+            continue
+        state = playback_snapshot(room)
+        if state and state.get("authority") == "server":
+            if not state["paused"] and state["position"] >= state["duration"]:
+                overlap = 3 if len(room.queue_items) > 1 and not room.queue_items[1].track_id.startswith(("spotify_", "apple_", "yandex_")) else 0
+                advance_room(room, overlap=overlap)
+                await manager.broadcast(lid)
+            else:
+                continue
+        if room.queue_items and server_head(room) and lid not in SERVER_PREPARES:
+            SERVER_PREPARES[lid] = asyncio.create_task(prepare_room_clock(lid, room, room.queue_items[0], room.playback_revision), name=f"{room.queue_items[0].id}:{room.playback_revision}")
+
+
+async def room_maintenance() -> None:
+    last_save = monotonic()
+    try:
+        while True:
+            await asyncio.sleep(.25)
+            await server_clock_tick()
+            for lid, room in list(LOBBIES.items()):
+                if not room.pending and is_expired(room):
+                    LOBBIES.pop(lid, None)
+                    mark_rooms_dirty()
+            if monotonic() - last_save >= 1:
+                await save_rooms()
+                last_save = monotonic()
+    finally:
+        tasks = list(SERVER_PREPARES.values())
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        SERVER_PREPARES.clear()
 
 
 def reset_relay(lobby: Lobby) -> None:
@@ -268,17 +515,18 @@ def relay_ice(lobby_id: str, member_id: str) -> list[dict[str, object]]:
 
 
 async def expire_empty(lobby_id: str, lobby: Lobby, stamp: float) -> None:
-    await asyncio.sleep(900 if lobby.ever_shared else 30)
+    await asyncio.sleep(room_idle_ttl(lobby))
     while LOBBIES.get(lobby_id) is lobby and not lobby.connections and lobby.last_empty == stamp:
         if not lobby.pending:
             LOBBIES.pop(lobby_id, None)
+            mark_rooms_dirty()
             return
         await asyncio.sleep(1)
 
 
 def is_expired(lobby: Lobby) -> bool:
     return (not lobby.connections and
-            monotonic() - lobby.last_empty >= (900 if lobby.ever_shared else 30))
+            monotonic() - lobby.last_empty >= (room_idle_ttl(lobby)))
 
 
 def playback_snapshot(lobby: Lobby) -> dict[str, object] | None:
@@ -287,6 +535,9 @@ def playback_snapshot(lobby: Lobby) -> dict[str, object] | None:
             state.get("item_id") != lobby.queue_items[0].id or
             state.get("revision") != lobby.playback_revision):
         return None
+    if state.get("authority") == "server":
+        position = float(state["position"]) + (0 if state["paused"] else max(0, monotonic() - lobby.clock_started))
+        return {**state, "position": min(float(state["duration"]), position), "server_time": time() * 1000}
     return state
 
 
@@ -295,7 +546,7 @@ def listener_lobby(lobby_id: str, token: str) -> Lobby:
     member_id = lobby.listener_tokens.get(token) if lobby and token else None
     if not lobby or not member_id or member_id not in lobby.connections:
         raise HTTPException(403, "Включите «Слушать вместе» в подключённой комнате")
-    if lobby.main_id is None:
+    if lobby.main_id is None and not server_head(lobby):
         raise HTTPException(409, "Ждём подключения хоста")
     return lobby
 
@@ -324,6 +575,8 @@ class ConnectionManager:
         if len(set(lobby.member_owners.values())) >= 2:
             lobby.ever_shared = True
         lobby.vacated = False
+        lobby.ever_connected = True
+        mark_rooms_dirty()
         if main:
             lobby.main_id = member_id
         await self.send(ws, {"type": "identity", "owner_id": owner_id, "member_id": member_id})
@@ -331,7 +584,10 @@ class ConnectionManager:
         return member_id
 
     def disconnect(self, lobby_id: str, member_id: str) -> None:
-        lobby = LOBBIES[lobby_id]
+        lobby = LOBBIES.get(lobby_id)
+        if lobby is None or member_id not in lobby.connections:
+            return
+        mark_rooms_dirty()
         lobby.connections.pop(member_id, None)
         lobby.member_owners.pop(member_id, None)
         lobby.member_telegram.pop(member_id, None)
@@ -345,7 +601,7 @@ class ConnectionManager:
         if lobby.main_id == member_id:
             lobby.main_id = None
             state = playback_snapshot(lobby)
-            if state:
+            if state and state.get("authority") != "server":
                 now = time() * 1000
                 position = float(state["position"])
                 if not state["paused"]:
@@ -362,6 +618,9 @@ class ConnectionManager:
             ):
                 lobby.profiles.pop(owner_id, None)
         if not lobby.connections:
+            state = playback_snapshot(lobby)
+            if state and state.get("authority") == "server":
+                set_room_clock(lobby, state["position"], state["duration"], True)
             lobby.last_empty = monotonic()
             lobby.vacated = True
             asyncio.create_task(expire_empty(lobby_id, lobby, lobby.last_empty))
@@ -378,8 +637,12 @@ class ConnectionManager:
             return False
 
     async def broadcast(self, lobby_id: str) -> None:
-        async with LOBBIES[lobby_id].broadcast_lock:
-            await self._broadcast(lobby_id)
+        lobby = LOBBIES.get(lobby_id)
+        if lobby is None:
+            return
+        async with lobby.broadcast_lock:
+            if LOBBIES.get(lobby_id) is lobby:
+                await self._broadcast(lobby_id)
 
     async def sync_listeners(self, lobby_id: str) -> None:
         lobby = LOBBIES[lobby_id]
@@ -425,6 +688,8 @@ class ConnectionManager:
                 "playback_revision": lobby.playback_revision,
                 "playback": playback_snapshot(lobby),
                 "host_online": lobby.main_id is not None,
+                "server_playback": server_head(lobby),
+                "playback_error": lobby.playback_error,
                 "queue_revision": lobby.queue_revision,
                 "profiles": dict(lobby.profiles),
                 "main_profile": lobby.profiles.get(lobby.owner_ids.get(lobby.host_token, "")),
@@ -483,6 +748,7 @@ async def create_lobby(body: TelegramAuth | None = None) -> dict[str, str]:
         lobby.owner_ids[host_token] = owner_id
         lobby.profiles[owner_id] = user.public()
     LOBBIES[lobby_id] = lobby
+    mark_rooms_dirty()
     asyncio.create_task(expire_empty(lobby_id, lobby, lobby.last_empty))
     return {"lobby_id": lobby_id, "host_token": host_token, "role": "Main"}
 
@@ -738,7 +1004,27 @@ async def lobby_ws(ws: WebSocket, lobby_id: str) -> None:
                     await manager.send(ws, {"type": "playback_clock", "client_time": stamp,
                                            "server_time": time() * 1000})
                 continue
+            elif message.get("action") == "playback_control":
+                state = playback_snapshot(lobby)
+                command = message.get("command")
+                if member_id != lobby.main_id:
+                    await manager.send(ws, {"type": "error", "error": "main_only"})
+                    continue
+                if (not server_head(lobby) or not state or state.get("authority") != "server" or
+                        message.get("item_id") != state["item_id"] or type(message.get("expected_revision")) is not int or
+                        message["expected_revision"] != lobby.playback_revision or command not in ("play", "pause", "seek")):
+                    await manager.send(ws, {"type": "error", "error": "stale_playback_control"})
+                    continue
+                position = message.get("position") if command == "seek" else state["position"]
+                if type(position) not in (int, float) or not math.isfinite(position) or not 0 <= position <= MAX_TRACK_SECONDS:
+                    await manager.send(ws, {"type": "error", "error": "invalid_position"})
+                    continue
+                set_room_clock(lobby, position, state["duration"], command == "pause" if command != "seek" else state["paused"])
+                await manager.broadcast(lobby_id)
+                continue
             elif message.get("action") == "playback_sync":
+                if server_head(lobby):
+                    continue
                 spotify_relay = bool(lobby.relay_source and lobby.queue_items and
                                      lobby.queue_items[0].track_id.startswith("spotify_"))
                 leader = lobby.relay_source if spotify_relay else lobby.main_id
@@ -771,6 +1057,8 @@ async def lobby_ws(ws: WebSocket, lobby_id: str) -> None:
                                   "serial": lobby.sync_serial,
                                   "transport_serial": lobby.sync_serial if control else
                                   previous.get("transport_serial", previous["serial"])}
+                if control:
+                    mark_rooms_dirty()
                 await manager.sync_listeners(lobby_id)
                 continue
             elif message.get("action") == "add_track":
@@ -892,6 +1180,8 @@ async def lobby_ws(ws: WebSocket, lobby_id: str) -> None:
                 if not changed:
                     continue
             elif message.get("action") == "skip_track":
+                if server_head(lobby) and message.get("ended") is True:
+                    continue
                 source_ended = (member_id == lobby.relay_source and lobby.queue_items and
                                 lobby.queue_items[0].track_id.startswith("spotify_") and
                                 message.get("ended") is True and
@@ -908,11 +1198,7 @@ async def lobby_ws(ws: WebSocket, lobby_id: str) -> None:
                 if not lobby.queue_items:
                     await manager.send(ws, {"type": "error", "error": "queue_empty"})
                     continue
-                removed = lobby.queue_items.pop(0)
-                if not any(item.track_id == removed.track_id for item in lobby.queue_items):
-                    lobby.track_titles.pop(removed.track_id, None)
-                lobby.playback_revision += 1
-                lobby.queue_revision += 1
+                advance_room(lobby)
             elif message.get("action") in ("remove_track", "move_track"):
                 if type(message.get("expected_queue_revision")) is not int or (
                     message["expected_queue_revision"] != lobby.queue_revision
@@ -935,6 +1221,9 @@ async def lobby_ws(ws: WebSocket, lobby_id: str) -> None:
                         lobby.track_titles.pop(removed.track_id, None)
                     if index == 0:
                         lobby.playback_revision += 1
+                        lobby.failed_at = 0
+                        lobby.playback_error = ""
+                        lobby.server_offset = 0
                 else:
                     if member_id != lobby.main_id:
                         await manager.send(ws, {"type": "error", "error": "main_only"})
@@ -956,6 +1245,7 @@ async def lobby_ws(ws: WebSocket, lobby_id: str) -> None:
             else:
                 await manager.send(ws, {"type": "error", "error": "invalid_message"})
                 continue
+            mark_rooms_dirty()
             await manager.broadcast(lobby_id)
     except (WebSocketDisconnect, RuntimeError):
         pass

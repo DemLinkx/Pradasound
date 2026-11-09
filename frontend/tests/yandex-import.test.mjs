@@ -163,7 +163,7 @@ function listenerHarness() {
     listenerError: { current: '' }, remoteRef: { current: snapshot }, currentItem: { id: snapshot.item_id },
     playbackRevision: 0, currentKey: 'track:0', listenerToken: 'private-listener', streamAttempt: 0,
     fallbackId: '', currentTrack: 'track', listenerApplied: { current: '' }, listenerTrack: { current: { key: '', count: 0, transport: -1, waiting: false } }, clockOffset: { current: 0 },
-    localPause: { current: false }, isSpotify: false, isApple: false, relayReceiving: false, spotifyWaiting: false, isRelaySource: false, audioPlayers: [{ current: player }],
+    localPause: { current: false }, isSpotify: false, isApple: false, relayReceiving: false, spotifyWaiting: false, isRelaySource: false, serverManaged: false, audioPlayers: [{ current: player }],
     activeAudioRef: { current: 0 }, slotKeys: { current: ['track:0', ''] },
     HTMLMediaElement: { HAVE_METADATA: 1 }, listeningPosition,
     localPlayback: () => ({ position: player.currentTime, paused: player.paused }),
@@ -275,4 +275,27 @@ test('double taps like once; triple taps dislike without first sending a like', 
   tap(state, 3000, vote); tap(state, 3110, vote); tap(state, 3220, vote); flush();
   assert.deepEqual(votes, [1, -1]);
   tap(state, 4000, vote); tap(state, 4500, vote); flush(); assert.deepEqual(votes, [1, -1]);
+});
+
+
+test('server-led Main follows the room clock without broadcasting an audio-focus pause', () => {
+  const { context, player, snapshot, sync } = listenerHarness();
+  context.session.role = 'Main'; context.serverManaged = true; context.listenWanted.current = false;
+  sync(); assert.equal(player.plays, 1);
+  player.paused = true;
+  sync(); assert.equal(player.plays, 1); // same transport: a local pause stays local
+  snapshot.paused = true; snapshot.transport_serial++;
+  sync(); assert.equal(player.plays, 1);
+  snapshot.paused = false; snapshot.transport_serial++;
+  sync(); assert.equal(player.plays, 2);
+});
+
+
+test('crossfade handles a frame timestamp before play completion without negative volume', () => {
+  const gain = sourceFunction('crossfadeVolumes');
+  assert.deepEqual([...gain(-.01, .8)], [.8, 0]);
+  assert.deepEqual([...gain(3, .8)], [0, .8]);
+  for (const elapsed of [-1, 0, 1, 2, 3, 10]) {
+    assert.ok(gain(elapsed, 1.5).every((volume) => volume >= 0 && volume <= 1));
+  }
 });

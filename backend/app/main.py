@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+from collections import OrderedDict
 import logging
 import re
 import secrets
@@ -26,7 +28,7 @@ from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
 from app.api.healthcheck import router as healthcheck_router
-from app.api.lobby import LOBBIES, listener_lobby, telegram_polling_loop
+from app.api.lobby import LOBBIES, listener_lobby, telegram_polling_loop, load_rooms, room_maintenance, save_rooms
 from app.api.lobby import router as lobby_router
 from app.providers.music import router as music_router
 from app.settings import MAX_TRACK_SECONDS, Settings
@@ -35,11 +37,21 @@ settings = Settings()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    load_rooms()
+    maintenance = asyncio.create_task(room_maintenance())
     task = (asyncio.create_task(telegram_polling_loop())
             if settings.telegram_polling_enabled and settings.telegram_bot_token else None)
     try:
         yield
     finally:
+        maintenance.cancel()
+        with suppress(asyncio.CancelledError):
+            await maintenance
+        await save_rooms()
+        unfinished = [entry[1] for entry in LISTENER_STREAMS.values() if not entry[1].done()] + list(MEDIA_PENDING.values())
+        for pending in unfinished:
+            pending.cancel()
+        await asyncio.gather(*unfinished, return_exceptions=True)
         if task:
             task.cancel()
             with suppress(asyncio.CancelledError):
@@ -78,6 +90,109 @@ YOUTUBE_AUDIO_FAILURES: dict[str, tuple[float, str]] = {}
 YOUTUBE_AUDIO_LOCKS: dict[str, asyncio.Lock] = {}
 YOUTUBE_ROUTE_HEALTH: dict[str | None, tuple[float, float]] = {}
 LISTENER_STREAMS: dict[tuple[str, str, int], tuple[float, asyncio.Task[dict[str, Any]]]] = {}
+
+
+MEDIA_PARTS: OrderedDict[tuple[str, str], tuple[float, tuple[int, dict[str, str], bytes]]] = OrderedDict()
+MEDIA_PENDING: dict[tuple[str, str], asyncio.Task] = {}
+MEDIA_BYTES = 0
+MEDIA_BUDGET = 64 * 1024 * 1024
+MEDIA_BLOCK = 256 * 1024
+MEDIA_LOAD_LIMIT = asyncio.Semaphore(4)
+
+
+async def bounded_media_body(response: httpx.Response, limit: int) -> bytes:
+    parts, size = [], 0
+    async for part in response.aiter_bytes(16384):
+        size += len(part)
+        if size > limit:
+            raise HTTPException(502, "Слишком большой фрагмент аудио")
+        parts.append(part)
+    return b"".join(parts)
+
+
+async def media_part(key: tuple[str, str], load):
+    global MEDIA_BYTES
+    now = monotonic()
+    for old_key, (expiry, entry) in list(MEDIA_PARTS.items()):
+        if expiry <= now:
+            MEDIA_BYTES -= len(entry[2])
+            MEDIA_PARTS.pop(old_key, None)
+    cached = MEDIA_PARTS.get(key)
+    if cached:
+        MEDIA_PARTS.move_to_end(key)
+        return cached[1]
+    pending = MEDIA_PENDING.get(key)
+    if pending is None:
+        if len(MEDIA_PENDING) >= 32:
+            raise HTTPException(503, "Аудиобуфер занят. Повторите запрос.")
+
+        async def fill():
+            global MEDIA_BYTES
+            try:
+                async with MEDIA_LOAD_LIMIT:
+                    value = await load()
+                size = len(value[2])
+                while MEDIA_PARTS and (MEDIA_BYTES + size > MEDIA_BUDGET or len(MEDIA_PARTS) >= 1024):
+                    _, (_, discarded) = MEDIA_PARTS.popitem(last=False)
+                    MEDIA_BYTES -= len(discarded[2])
+                if size <= MEDIA_BUDGET:
+                    MEDIA_PARTS[key] = (monotonic() + 600, value)
+                    MEDIA_BYTES += size
+                return value
+            finally:
+                MEDIA_PENDING.pop(key, None)
+
+        pending = asyncio.create_task(fill())
+        MEDIA_PENDING[key] = pending
+        pending.add_done_callback(lambda task: task.exception() if not task.cancelled() else None)
+    return await asyncio.shield(pending)
+
+
+async def shared_audio_response(source_key: str, byte_range: str | None, fetch_part) -> StreamingResponse:
+    async def metadata():
+        status, headers, _ = await fetch_part("bytes=0-0", MEDIA_BLOCK)
+        match = re.fullmatch(r"bytes \d+-\d+/(\d+)", headers.get("content-range", ""))
+        if status != 206 or not match or not 0 < int(match[1]) <= 64 * 1024 * 1024:
+            raise HTTPException(502, "Источник не поддерживает безопасную буферизацию аудио")
+        return status, headers, b""
+
+    _, info, _ = await media_part((source_key, "metadata"), metadata)
+    total = int(info["content-range"].rsplit("/", 1)[1])
+    start, end = 0, total - 1
+    if byte_range:
+        match = re.fullmatch(r"bytes=(\d{0,12})-(\d{0,12})", byte_range)
+        if not match or not any(match.groups()):
+            raise HTTPException(416, "Некорректный диапазон", headers={"Content-Range": f"bytes */{total}"})
+        if match[1]:
+            start, end = int(match[1]), min(int(match[2]), total - 1) if match[2] else total - 1
+        else:
+            start = max(0, total - int(match[2]))
+        if start > end or start >= total:
+            raise HTTPException(416, "Диапазон за пределами трека", headers={"Content-Range": f"bytes */{total}"})
+
+    async def chunks():
+        position = start
+        while position <= end:
+            block = position // MEDIA_BLOCK * MEDIA_BLOCK
+            last = min(total - 1, block + MEDIA_BLOCK - 1)
+
+            async def load(block=block, last=last):
+                status, headers, body = await fetch_part(f"bytes={block}-{last}", MEDIA_BLOCK)
+                expected = f"bytes {block}-{last}/{total}"
+                if status != 206 or headers.get("content-range") != expected or len(body) != last - block + 1:
+                    raise HTTPException(502, "Источник вернул неполный диапазон аудио")
+                return status, headers, body
+
+            _, _, body = await media_part((source_key, str(block)), load)
+            stop = min(end + 1, last + 1)
+            yield body[position - block:stop - block]
+            position = stop
+
+    headers = {"Content-Length": str(end - start + 1), "Accept-Ranges": "bytes", "Cache-Control": "no-store"}
+    if byte_range:
+        headers["Content-Range"] = f"bytes {start}-{end}/{total}"
+    return StreamingResponse(chunks(), status_code=206 if byte_range else 200,
+                             media_type=info.get("content-type", "audio/mp4"), headers=headers)
 
 
 class QuietYoutubeLog:
@@ -253,6 +368,20 @@ async def stream_youtube_audio(ticket: str, request: Request) -> StreamingRespon
     source = await youtube_audio_url(video_id)
     if source.duration > MAX_TRACK_SECONDS:
         raise HTTPException(422, "Трек длиннее 12 минут")
+    if settings.server_playback_enabled:
+        async def fetch_part(part_range: str, limit: int):
+            async with httpx.AsyncClient(proxy=source.proxy, headers=source.headers, trust_env=False,
+                                         timeout=httpx.Timeout(15, read=30), follow_redirects=False) as shared_client:
+                response = await open_youtube_stream(shared_client, source.url, part_range)
+                try:
+                    if response.status_code not in (200, 206):
+                        YOUTUBE_AUDIO_CACHE.pop(video_id, None)
+                        raise HTTPException(502, "Аудиосервер YouTube временно недоступен")
+                    return response.status_code, dict(response.headers), await bounded_media_body(response, limit)
+                finally:
+                    await response.aclose()
+        key = "youtube:" + hashlib.sha256(source.url.encode()).hexdigest()
+        return await shared_audio_response(key, byte_range, fetch_part)
     client = httpx.AsyncClient(proxy=source.proxy, headers=source.headers, trust_env=False,
                                timeout=httpx.Timeout(15, read=60), follow_redirects=False)
 
@@ -632,18 +761,19 @@ def yandex_queue_stream(
         raise
 
 
-@app.get("/api/listen/{lobby_id}/{item_id}/stream")
-async def listener_stream(
-    lobby_id: str, item_id: str, x_listener_token: str = Header(default="")
-) -> dict[str, Any]:
-    lobby = listener_lobby(lobby_id, x_listener_token)
+async def room_stream_descriptor(lobby_id: str, item_id: str) -> dict[str, Any]:
+    lobby = LOBBIES.get(lobby_id)
+    if lobby is None:
+        raise HTTPException(404, "Комната не найдена")
     item = next((entry for entry in lobby.queue_items[:2] if entry.id == item_id), None)
     if item is None:
         raise HTTPException(404, "Доступны только текущий и следующий треки комнаты")
     key = (lobby_id, item.id, item.access_revision)
     now = monotonic()
     for cached_key, (expiry, task) in list(LISTENER_STREAMS.items()):
-        if expiry < now and task.done():
+        owner = LOBBIES.get(cached_key[0])
+        needed = owner is not None and any(entry.id == cached_key[1] for entry in owner.queue_items[:2])
+        if task.done() and (expiry < now or not needed):
             del LISTENER_STREAMS[cached_key]
     cached = LISTENER_STREAMS.get(key)
     if cached is None:
@@ -657,12 +787,13 @@ async def listener_stream(
                 )
             if item.track_id.startswith(("sc_", "vk_")):
                 from app.providers.music import queue_stream
-                return await queue_stream(lobby_id, item_id, lobby.host_token)
+                data = await queue_stream(lobby_id, item_id, lobby.host_token)
+                return {**data, "duration": data.get("duration") or item.duration_ms / 1000}
             if item.track_id.startswith(("spotify_", "apple_")):
                 raise HTTPException(422, "Оригинал воспроизводится в личном браузерном плеере сервиса")
             return await prepare_youtube_audio(item.track_id, lobby_id, lobby.host_token)
 
-        cached = (now + 60, asyncio.create_task(resolve()))
+        cached = (now + 600, asyncio.create_task(resolve()))
         LISTENER_STREAMS[key] = cached
     try:
         result = await asyncio.shield(cached[1])
@@ -670,7 +801,25 @@ async def listener_stream(
         if LISTENER_STREAMS.get(key) is cached:
             LISTENER_STREAMS.pop(key, None)
         raise
-    listener_lobby(lobby_id, x_listener_token)
     if not any(entry.id == item_id for entry in lobby.queue_items[:2]):
         raise HTTPException(409, "Очередь уже переключилась; обновляем плеер")
+    return result
+
+
+@app.get("/api/room/{lobby_id}/{item_id}/stream")
+async def room_host_stream(lobby_id: str, item_id: str, x_host_token: str = Header(default="")) -> dict[str, Any]:
+    lobby = LOBBIES.get(lobby_id)
+    if not lobby or not secrets.compare_digest(x_host_token, lobby.host_token):
+        raise HTTPException(403, "Доступно только хосту комнаты")
+    result = await room_stream_descriptor(lobby_id, item_id)
+    if not secrets.compare_digest(x_host_token, lobby.host_token):
+        raise HTTPException(403, "Права хоста изменились")
+    return result
+
+
+@app.get("/api/listen/{lobby_id}/{item_id}/stream")
+async def listener_stream(lobby_id: str, item_id: str, x_listener_token: str = Header(default="")) -> dict[str, Any]:
+    listener_lobby(lobby_id, x_listener_token)
+    result = await room_stream_descriptor(lobby_id, item_id)
+    listener_lobby(lobby_id, x_listener_token)
     return result

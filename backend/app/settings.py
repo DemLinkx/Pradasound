@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 MAX_TRACK_SECONDS = 12 * 60
@@ -38,3 +39,6 @@ class Settings(BaseSettings):
     telegram_polling_enabled: bool = False
     relay_turn_urls: list[str] = []
     relay_turn_secret: str = ""
+    server_playback_enabled: bool = False
+    room_state_file: Path | None = None
+    room_state_key: SecretStr = SecretStr("")

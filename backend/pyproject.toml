@@ -15,6 +15,7 @@ dependencies = [
     "httpx>=0.28,<1",
     "yandex-music[async]==3.0.0",
     "yt-dlp[default]>=2026.10.26",
+    "cryptography>=46,<48",
 ]
 
 [dependency-groups]

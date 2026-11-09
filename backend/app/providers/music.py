@@ -1792,8 +1792,9 @@ async def queue_stream(
             raise HTTPException(422, "VK не предоставил поддерживаемый полный аудиопоток")
         if ".m3u8" in urlparse(url).path.lower():
             ticket_id = _new_ticket(url, None, provider="vk")
-            return {"url": f"/api/music/hls/{ticket_id}/index.m3u8", "format": "hls"}
-        return {"url": url, "format": "audio"}
+            return {"url": f"/api/music/hls/{ticket_id}/index.m3u8", "format": "hls", "duration": metadata.get("duration_ms", 0) / 1000}
+        ticket_id = _new_ticket(url, None, provider="vk")
+        return {"url": f"/api/music/hls/{ticket_id}/audio.bin", "format": "audio", "duration": metadata.get("duration_ms", 0) / 1000}
     if session.access_token:
         await _refresh(session)
         auth = {"Authorization": f"OAuth {session.access_token}"}
@@ -1812,8 +1813,10 @@ async def queue_stream(
         if not isinstance(url, str) or not _safe_media_url(url):
             raise HTTPException(422, "SoundCloud не предоставил полный HLS-поток")
         ticket_id = _new_ticket(url, _proxy())
-        return {"url": f"/api/music/hls/{ticket_id}/index.m3u8", "format": "hls"}
+        return {"url": f"/api/music/hls/{ticket_id}/index.m3u8", "format": "hls", "duration": metadata.get("duration_ms", 0) / 1000}
     info = await _extract_async(str(metadata["canonical_url"]))
+    if type(info.get("duration")) in (int, float) and 0 < info["duration"] <= MAX_TRACK_SECONDS:
+        metadata["duration_ms"] = int(info["duration"] * 1000)
     formats = info.get("formats") or []
     if not isinstance(formats, list):
         raise HTTPException(422, "SoundCloud не предоставил аудиопоток")
@@ -1834,14 +1837,14 @@ async def queue_stream(
     if hls:
         best = max(hls, key=lambda f: (f.get("abr") or 0, f.get("tbr") or 0))
         ticket_id = _new_ticket(best["url"], info.get("_prada_proxy", _proxy()))
-        return {"url": f"/api/music/hls/{ticket_id}/index.m3u8", "format": "hls"}
+        return {"url": f"/api/music/hls/{ticket_id}/index.m3u8", "format": "hls", "duration": metadata.get("duration_ms", 0) / 1000}
     progressive = [
         f for f in candidates if f.get("protocol") in ("http", "https") and ".m3u8" not in f["url"]
     ]
     if progressive:
         best = max(progressive, key=lambda f: f.get("abr") or 0)
         ticket_id = _new_ticket(best["url"], info.get("_prada_proxy", _proxy()))
-        return {"url": f"/api/music/hls/{ticket_id}/audio.bin", "format": "audio"}
+        return {"url": f"/api/music/hls/{ticket_id}/audio.bin", "format": "audio", "duration": metadata.get("duration_ms", 0) / 1000}
     raise HTTPException(422, "SoundCloud не предоставил полный поддерживаемый аудиопоток")
 
 
@@ -1927,6 +1930,23 @@ async def hls_resource(ticket_id: str, resource: str, range: str = Header(defaul
             raise HTTPException(404, "Аудиофайл не найден")
     if range and not re.fullmatch(r"bytes=\d{0,12}-\d{0,12}", range):
         raise HTTPException(400, "Некорректный Range")
+    from app.main import settings as app_settings
+    if app_settings.server_playback_enabled and not resource.endswith(".m3u8"):
+        from app.main import bounded_media_body, media_part, shared_audio_response
+        async def fetch_part(part_range: str, limit: int):
+            async with _client(ticket.proxy) as shared_client:
+                shared_response = await _open_media(shared_client, source, part_range, ticket.provider)
+                try:
+                    return shared_response.status_code, dict(shared_response.headers), await bounded_media_body(shared_response, limit)
+                finally:
+                    await shared_response.aclose()
+        key = ticket.provider + ":" + hashlib.sha256(source.encode()).hexdigest()
+        if resource == "audio.bin":
+            return await shared_audio_response(key, range or None, fetch_part)
+        status, headers, body = await media_part((key, range), lambda: fetch_part(range, 16_000_000))
+        return Response(body, status_code=status, media_type=headers.get("content-type", "audio/mp4"),
+                        headers={**{name: value for name, value in headers.items() if name in ("content-range", "accept-ranges")},
+                                 "Cache-Control": "private, max-age=30"})
     client = _client(ticket.proxy)
     try:
         response = await _open_media(client, source, range, ticket.provider)

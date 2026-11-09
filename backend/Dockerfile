@@ -21,7 +21,8 @@ ENV PATH="/app/backend/.venv/bin:$PATH" \
 COPY --from=spotify-reader /spotify-library /usr/local/bin/prada-spotify-library
 COPY --from=denoland/deno:bin-2.9.8 /deno /usr/local/bin/deno
 RUN groupadd --gid 10001 prada \
-    && useradd --uid 10001 --gid prada --no-create-home --shell /usr/sbin/nologin prada
+    && useradd --uid 10001 --gid prada --no-create-home --shell /usr/sbin/nologin prada \
+    && mkdir -p /app/state && chown 10001:10001 /app/state && chmod 700 /app/state
 WORKDIR /app/backend
 COPY --from=dependencies --chown=10001:10001 /app/backend/.venv ./.venv
 COPY --chown=10001:10001 backend/app ./app

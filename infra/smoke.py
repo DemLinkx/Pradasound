@@ -58,9 +58,10 @@ def check(base: str, audio_enabled: bool = False) -> None:
             guest.send(json.dumps({"member_token": secrets.token_hex(32)}))
             state(host)
             state(guest)
-            guest.send(json.dumps({"action": "add_track", "track_id": "dQw4w9WgXcQ", "title": "Smoke test"}))
+            # A synthetic Yandex reference exercises room/auth/sync without contacting a provider.
+            guest.send(json.dumps({"action": "add_track", "track_id": "yandex_123", "yandex_session": "s" * 40, "title": "Smoke test"}))
             added = state(host)
-            assert added["tracks_queue"] == state(guest)["tracks_queue"] == ["dQw4w9WgXcQ"]
+            assert added["tracks_queue"] == state(guest)["tracks_queue"] == ["yandex_123"]
             guest.send(json.dumps({"action": "listen_together", "enabled": True}))
             access = json.loads(guest.recv(timeout=10))
             assert access["type"] == "listener_access" and access["token"] != room["host_token"]

@@ -36,6 +36,11 @@ function playbackLength(native: number, catalog = 0) {
   return lengths.length ? Math.min(MAX_TRACK_SECONDS, ...lengths) : 0;
 }
 
+function crossfadeVolumes(elapsed: number, volume: number) {
+  const seconds = Math.max(0, elapsed), base = Math.max(0, Math.min(1, volume));
+  return [base * Math.max(0, 1 - seconds / 3), base * Math.min(1, seconds / 2)];
+}
+
 function drawerSwipe(dx: number, dy: number, open: 'queue' | 'library' | null): 'queue' | 'library' | null | undefined {
   if (Math.abs(dx) < 52 || Math.abs(dx) < Math.abs(dy) * 1.3) return undefined;
   if (open) return (open === 'library' && dx > 0 || open === 'queue' && dx < 0) ? null : undefined;
@@ -123,7 +128,7 @@ function yandexPage(value: unknown) {
 }
 type YandexLogin = { login_id: string; verification_url: string; user_code: string; interval: number; expires_in: number };
 type QueueItem = { rating?: number; likes?: number; dislikes?: number; id: string; track_id: string; owner_id: string; access_revision?: number; canonical_url?: string; duration_ms?: number };
-type PlaybackSync = { item_id: string; revision: number; position: number; duration: number; paused: boolean; server_time: number; serial: number; transport_serial?: number };
+type PlaybackSync = { item_id: string; revision: number; position: number; duration: number; paused: boolean; server_time: number; serial: number; transport_serial?: number; authority?: 'server' };
 function playbackSnapshot(value: unknown): PlaybackSync | null {
   if (!value || typeof value !== 'object') return null;
   const s = value as Partial<PlaybackSync>;
@@ -496,6 +501,8 @@ export default function App() {
   });
   const [roomId, setRoomId] = useState('');
   const [trackId, setTrackId] = useState('');
+  const [serverPlayback, setServerPlayback] = useState(false);
+  const [serverPlaybackError, setServerPlaybackError] = useState('');
   const [queueItems, setQueueItems] = useState<QueueItem[]>([]);
   const [myVotes, setMyVotes] = useState<Record<string, number>>({});
   const tracksQueue = useMemo(() => queueItems.map((item) => item.track_id), [queueItems]);
@@ -975,6 +982,8 @@ export default function App() {
             'queue_revision' in message && typeof message.queue_revision === 'number' &&
             Number.isSafeInteger(message.queue_revision) && message.queue_revision >= 0) {
           setQueueItems(message.queue_items as QueueItem[]);
+          setServerPlayback('server_playback' in message && message.server_playback === true);
+          setServerPlaybackError('playback_error' in message && typeof message.playback_error === 'string' ? message.playback_error : '');
           setMyVotes('my_votes' in message && message.my_votes && typeof message.my_votes === 'object' ? message.my_votes as Record<string, number> : {});
           if ('relay' in message && message.relay && typeof message.relay === 'object') {
             const next = message.relay as RelayState;
@@ -1041,13 +1050,14 @@ export default function App() {
   const currentTrack = currentItem?.track_id;
   const isSpotify = currentTrack?.startsWith('spotify_') === true;
   const isApple = currentTrack?.startsWith('apple_') === true;
+  const serverManaged = serverPlayback && !isSpotify && !isApple && !currentTrack?.startsWith('yandex_');
   const currentKey = `${playbackRevision}:${currentItem?.id}`;
   const isRelaySource = Boolean(connectionId && relay.source_id === connectionId);
   const spotifyMode = spotifyPlayerMode(session?.role, isRelaySource, Boolean(relay.source_id), spotifyPersonal);
   const spotifyEmbed = isSpotify && spotifyMode === 'embed';
   const spotifyWaiting = isSpotify && spotifyMode === 'waiting';
   const spotifyLeadsPlayback = session?.role === 'Main' || isRelaySource;
-  const playbackDevice = session?.role === 'Main' || isRelaySource && isSpotify || Boolean(listenTogether && listenerToken && hostOnline && status === 'connected');
+  const playbackDevice = session?.role === 'Main' || isRelaySource && isSpotify || Boolean(listenTogether && listenerToken && (hostOnline || serverManaged) && status === 'connected');
   const relayReceiving = Boolean(isSpotify && relay.source_id && !isRelaySource && playbackDevice);
   const renderPlayer = session?.role === 'Main' || listenTogether || isRelaySource && isSpotify;
 
@@ -1196,6 +1206,14 @@ export default function App() {
     const yandex = item.track_id.startsWith('yandex_');
     const music = item.track_id.startsWith('sc_') || item.track_id.startsWith('vk_');
     if (!session?.host_token || !session.lobby_id) throw new Error('Нет доступа хоста к воспроизведению.');
+    if (serverPlayback && !yandex) {
+      const response = await fetch(`/api/room/${session.lobby_id}/${item.id}/stream`, { signal, headers: { 'X-Host-Token': session.host_token! } });
+      const data = await response.json();
+      if (!response.ok || typeof data.url !== 'string' || !/^\/api\/(?:youtube\/audio\/file|music\/hls)\//.test(data.url))
+        throw new Error(typeof data.detail === 'string' ? data.detail : 'Сервер готовит аудиопоток. Повторите загрузку.');
+      if (typeof data.duration === 'number' && data.duration > 0) setTrackDurations((old) => ({ ...old, [item.track_id]: data.duration }));
+      return data.url;
+    }
     const response = await fetch(yandex ?
       `/api/yandex/queue/${session.lobby_id}/${item.id}/stream` : music ?
       `/api/music/queue/${session.lobby_id}/${item.id}/stream` : `/api/youtube/audio/${item.track_id}`, {
@@ -1279,7 +1297,7 @@ export default function App() {
       return;
     }
     const buffered = preloaded.current;
-    if (session?.role === 'Member' && playbackDevice && buffered && buffered.id === currentItem?.id && slotKeys.current[buffered.slot] === currentKey) {
+    if ((session?.role === 'Member' || serverManaged) && playbackDevice && buffered && buffered.id === currentItem?.id && slotKeys.current[buffered.slot] === currentKey) {
       preloaded.current = null;
       activeAudioRef.current = buffered.slot;
       setActiveAudio(buffered.slot);
@@ -1321,7 +1339,7 @@ export default function App() {
             await loadAudio(slot, url, controller.signal);
             if (controller.signal.aborted) return;
             player.volume = volumeRef.current;
-            if (session?.role === 'Main') void player.play().catch(() => { if (!controller.signal.aborted) setAudioError('Нажмите ▶, чтобы начать воспроизведение.'); });
+            if (session?.role === 'Main' && !serverManaged) void player.play().catch(() => { if (!controller.signal.aborted) setAudioError('Нажмите ▶, чтобы начать воспроизведение.'); });
           }
           setAudioUrl(url);
         }
@@ -1332,7 +1350,8 @@ export default function App() {
           } else if (!VIDEO_ID.test(currentItem.track_id)) {
             setAudioError(cause instanceof Error ? cause.message : 'Не удалось открыть аудио.');
             setPlayingKey('');
-          } else setFallbackId(currentTrack);
+          } else if (!serverManaged) setFallbackId(currentTrack);
+          else setAudioError(cause instanceof Error ? cause.message : 'Сервер готовит аудиопоток.');
         }
       }
     })();
@@ -1560,20 +1579,20 @@ export default function App() {
   }
 
   function publishHostPlayback(position?: number) {
-    if (relayReceiving || session?.role !== 'Main' && !(isRelaySource && isSpotify) || !currentItem || status !== 'connected' || socket.current?.readyState !== WebSocket.OPEN) return;
+    if (serverManaged || relayReceiving || session?.role !== 'Main' && !(isRelaySource && isSpotify) || !currentItem || status !== 'connected' || socket.current?.readyState !== WebSocket.OPEN) return;
     const state = localPlayback();
     socket.current.send(JSON.stringify({ action: 'playback_sync', item_id: currentItem.id, expected_revision: playbackRevision,
       position: Math.max(0, Math.min(86400, position ?? state.position)), duration: Math.max(0, Math.min(86400, state.duration)), paused: state.paused, seek: position !== undefined }));
   }
 
   useEffect(() => {
-    if (relayReceiving || session?.role !== 'Main' && !(isRelaySource && isSpotify) || status !== 'connected' || !currentItem) return;
+    if (serverManaged || relayReceiving || session?.role !== 'Main' && !(isRelaySource && isSpotify) || status !== 'connected' || !currentItem) return;
     publishHostPlayback(); const timer = setInterval(() => publishHostPlayback(), 10000);
     return () => clearInterval(timer);
-  }, [currentKey, playingKey, audioUrl, fallbackId, session?.role, status, isRelaySource, relayReceiving]);
+  }, [currentKey, playingKey, audioUrl, fallbackId, session?.role, status, isRelaySource, relayReceiving, serverManaged]);
 
   useEffect(() => {
-    if (relayReceiving || session?.role !== 'Main' && !(isRelaySource && isSpotify) || !playbackDevice || !currentItem) return;
+    if (serverManaged || relayReceiving || session?.role !== 'Main' && !(isRelaySource && isSpotify) || !playbackDevice || !currentItem) return;
     const timer = setInterval(() => {
       const state = localPlayback();
       const limit = playbackLength(state.duration, (currentItem.duration_ms || 0) / 1000) || MAX_TRACK_SECONDS;
@@ -1583,11 +1602,11 @@ export default function App() {
       }
     }, 400);
     return () => clearInterval(timer);
-  }, [currentKey, playbackDevice, playingKey, trackDurations, fallbackId, appleReady, session?.role, relayReceiving, isRelaySource]);
+  }, [currentKey, playbackDevice, playingKey, trackDurations, fallbackId, appleReady, session?.role, relayReceiving, isRelaySource, serverManaged]);
 
   function syncListener(force = false) {
     if (relayReceiving || spotifyWaiting || isRelaySource && isSpotify) return;
-    if (session?.role !== 'Member' || !playbackDevice || !listenWanted.current || listenerError.current && !force) return;
+    if ((session?.role !== 'Member' && !serverManaged) || !playbackDevice || (session?.role === 'Member' && !listenWanted.current) || listenerError.current && !force) return;
     const snapshot = remoteRef.current;
     if (!snapshot || snapshot.item_id !== currentItem?.id || snapshot.revision !== playbackRevision) return;
     const command = `${currentKey}:${listenerToken}:${streamAttempt}:${fallbackId}:${snapshot.transport_serial ?? snapshot.paused}`;
@@ -1598,7 +1617,7 @@ export default function App() {
     const previous = listenerTrack.current;
     const newTrack = previous.key !== currentKey;
     const count = newTrack ? previous.count + 1 : previous.count;
-    const align = force || count === 1 || (newTrack && count % 5 === 0) || (!newTrack && previous.transport !== (snapshot.transport_serial ?? snapshot.serial) && !(previous.waiting && !snapshot.paused));
+    const align = force || serverManaged && newTrack || count === 1 || (newTrack && count % 5 === 0) || (!newTrack && previous.transport !== (snapshot.transport_serial ?? snapshot.serial) && !(previous.waiting && !snapshot.paused));
     try {
       if (isApple) {
         const player = applePlayer.current; if (!player || !appleReady) return;
@@ -1628,7 +1647,7 @@ export default function App() {
         player.playbackRate = 1;
         if (paused) { if (!player.paused) player.pause(); }
         else if (player.paused) void player.play().catch(() => {
-          if (listenWanted.current && slotKeys.current[activeAudioRef.current] === currentKey) {
+          if ((listenWanted.current || session?.role === 'Main' && serverManaged) && slotKeys.current[activeAudioRef.current] === currentKey) {
             listenerError.current = 'Нажмите ▶, чтобы разрешить звук на этом устройстве.'; setAudioError(listenerError.current);
           }
         });
@@ -1638,9 +1657,17 @@ export default function App() {
   }
 
   useEffect(() => {
-    if (session?.role !== 'Member' || !playbackDevice) return;
+    if ((session?.role !== 'Member' && !serverManaged) || !playbackDevice) return;
     syncListener();
-  }, [currentKey, playbackDevice, remotePlayback, audioUrl, spotifyReady, appleReady, fallbackId, playingKey, listenPaused, audioError]);
+  }, [currentKey, playbackDevice, remotePlayback, audioUrl, spotifyReady, appleReady, fallbackId, playingKey, listenPaused, audioError, serverManaged]);
+
+  useEffect(() => {
+    if (!serverManaged || !playbackDevice) return;
+    const resume = () => { if (!document.hidden) syncListener(true); };
+    document.addEventListener('visibilitychange', resume);
+    window.addEventListener('pageshow', resume);
+    return () => { document.removeEventListener('visibilitychange', resume); window.removeEventListener('pageshow', resume); };
+  }, [serverManaged, playbackDevice, currentKey, audioUrl, remotePlayback]);
 
   function toggleListenTogether() {
     const enabled = !listenTogether;
@@ -2017,13 +2044,19 @@ export default function App() {
     finally { setLoadingLikes(false); }
   }
 
-  function skipTrack() {
+  function skipTrack(manual = false) {
+    if (serverManaged && !manual) return false;
     const ws = socket.current;
     if (session?.role !== 'Main' && !(isRelaySource && isSpotify) || !tracksQueue.length ||
         status !== 'connected' || ws?.readyState !== WebSocket.OPEN || skipSent.current === currentKey) return false;
     setError('');
     try { ws.send(JSON.stringify({ action: 'skip_track', expected_revision: playbackRevision, ...(isRelaySource && isSpotify ? { ended: true, item_id: currentItem?.id } : {}) })); skipSent.current = currentKey; return true; }
     catch { setError('Не удалось переключить трек. Подключитесь снова.'); return false; }
+  }
+
+  function controlRoom(command: 'play' | 'pause' | 'seek', position?: number) {
+    if (session?.role !== 'Main' || socket.current?.readyState !== WebSocket.OPEN) return;
+    socket.current.send(JSON.stringify({ action: 'playback_control', command, position, item_id: currentItem?.id, expected_revision: playbackRevision }));
   }
 
   function togglePlayback() {
@@ -2044,6 +2077,12 @@ export default function App() {
       const paused = playingKey === currentKey;
       localPause.current = paused; setListenPaused(paused); listenerError.current = '';
       syncListener(true); return;
+    }
+    if (serverManaged && session?.role === 'Main') {
+      if (remoteRef.current?.paused) controlRoom('play');
+      else if (localPlayback().paused) { listenerError.current = ''; syncListener(true); }
+      else controlRoom('pause');
+      return;
     }
     if (isApple) { const player = applePlayer.current; if (player?.isPlaying) player.pause(); else void player?.play().catch(() => setAudioError('Не удалось начать Apple Music. Проверьте подключение и подписку.')); return; }
     if (isSpotify) { spotifyPlayer.current?.togglePlay(); return; }
@@ -2069,6 +2108,7 @@ export default function App() {
     if (!currentTrack || !playbackDuration || session?.role !== 'Main') return;
     const target = Math.max(0, Math.min(seconds, playbackDuration));
     setPlaybackTime(target);
+    if (serverManaged) { controlRoom('seek', target); return; }
     if (relayReceiving) { sendRelay({ action: 'relay_control', command: 'seek', position: target, item_id: currentItem?.id, expected_revision: playbackRevision }); return; }
     if (isApple) void applePlayer.current?.seekToTime(target).catch(() => setAudioError('Не удалось перемотать Apple Music.'));
     else if (isSpotify) spotifyPlayer.current?.seek(Math.floor(target));
@@ -2108,11 +2148,11 @@ export default function App() {
     if (old) { old.pause(); old.volume = volumeRef.current; }
     if (next) next.volume = volumeRef.current;
     promoting.current = { id: ready.id, url: ready.url, slot: ready.slot, revision: playbackRevision + 1 };
-    if (!skipTrack()) { promoting.current = null; next?.pause(); }
+    if (!serverManaged && !skipTrack()) { promoting.current = null; next?.pause(); }
   }
 
   function maybeCrossfade(slot: number) {
-    if (session?.role !== 'Main' || slot !== activeAudioRef.current || slotKeys.current[slot] !== currentKey ||
+    if ((session?.role !== 'Main' && !serverManaged) || slot !== activeAudioRef.current || slotKeys.current[slot] !== currentKey ||
         fading.current || skipSent.current === currentKey) return;
     const old = audioPlayers[slot].current;
     const ready = preloaded.current;
@@ -2131,8 +2171,8 @@ export default function App() {
       const tick = (now: number) => {
         if (!fading.current) return;
         const elapsed = (now - started) / 1000;
-        old.volume = volumeRef.current * Math.max(0, 1 - elapsed / 3);
-        next.volume = volumeRef.current * Math.min(1, elapsed / 2);
+        const [outgoing, incoming] = crossfadeVolumes(elapsed, volumeRef.current);
+        old.volume = outgoing; next.volume = incoming;
         if (elapsed >= 3) finishFade();
         else fadeFrame.current = requestAnimationFrame(tick);
       };
@@ -2388,7 +2428,7 @@ export default function App() {
         {session.role === 'Member' && <section className="card cardpad">
           <div className="sectionhead"><div><span className="eyebrow">СЛУШАТЬ ВМЕСТЕ</span><h3>{listenTogether ? 'Музыка на вашем устройстве' : 'Сейчас звук только у хоста'}</h3></div>
             <button className={`button ${listenTogether ? '' : 'primary'}`} disabled={status !== 'connected'} onClick={toggleListenTogether}>{listenTogether ? 'Выключить у себя' : 'Слушать вместе'}</button></div>
-          <p className="muted small">{listenTogether ? status !== 'connected' ? 'Восстанавливаем соединение. Звук приостановлен.' : !hostOnline ? 'Ждём подключения хоста.' : listenPaused ? 'У вас пауза. Нажмите ▶, чтобы продолжить вместе с хостом.' : 'Общая песня, пауза и перемотка. Во время песни позиция не подстраивается — возможна небольшая задержка.' : 'Включите звук в своих наушниках, сохранив общую очередь.'}</p>
+          <p className="muted small">{listenTogether ? status !== 'connected' ? 'Восстанавливаем соединение. Звук приостановлен.' : !hostOnline && !serverManaged ? 'Ждём подключения хоста.' : listenPaused ? 'У вас пауза. Нажмите ▶, чтобы продолжить вместе с хостом.' : 'Общая песня, пауза и перемотка. Во время песни позиция не подстраивается — возможна небольшая задержка.' : 'Включите звук в своих наушниках, сохранив общую очередь.'}</p>
           {listenTogether && isSpotify && <p className="muted small">{relay.source_id ? 'Звук приходит от транслятора. Вход в Spotify на вашем устройстве не нужен.' : 'Для оригиналов нужен собственный доступ Spotify или транслятор с компьютера.'}</p>}
         </section>}
         <section className="card cardpad"><details open={Boolean(relay.source_id || relay.requests.length || relayCapture.current || captureProbe.pending || relayError)}><summary>Spotify · трансляция звука</summary>
@@ -2448,7 +2488,7 @@ export default function App() {
                 if (fadeFrame.current !== null) cancelAnimationFrame(fadeFrame.current);
                 audioPlayers[1 - activeAudioRef.current].current?.pause();
               }
-              skipTrack();
+              skipTrack(true);
             }} aria-label="Следующий трек" title="Следующий трек">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m5 5 10 7L5 19V5Z" /><path d="M19 5v14" /></svg>
             </button>
@@ -2473,7 +2513,7 @@ export default function App() {
             onDurationChange={(event) => { if (slot === activeAudioRef.current && slotKeys.current[slot] === currentKey) syncPlaybackTime(event.currentTarget); }}
             onTimeUpdate={(event) => { if (slot === activeAudioRef.current && slotKeys.current[slot] === currentKey) { syncPlaybackTime(event.currentTarget); warmNextAudio(); const duration = playbackLength(event.currentTarget.duration, trackDurations[currentTrack || ''] || (currentItem?.duration_ms || 0) / 1000) || MAX_TRACK_SECONDS; if (session.role === 'Main' && event.currentTarget.currentTime >= duration) { if (fading.current) finishFade(); else skipTrack(); } } maybeCrossfade(slot); }}
             onEnded={() => { if (slot === activeAudioRef.current && slotKeys.current[slot] === currentKey) {
-              if (session.role !== 'Main') { setPlayingKey(''); return; }
+              if (session.role !== 'Main' && !serverManaged) { setPlayingKey(''); return; }
               const next = preloaded.current && audioPlayers[preloaded.current.slot].current;
               if (fading.current && next && !next.paused) finishFade();
               else { fading.current = false; skipTrack(); }
@@ -2484,7 +2524,8 @@ export default function App() {
                   audioRetryKey.current = currentKey;
                   preparedAudio.current.delete(audioCacheKey(currentItem));
                   setStreamAttempt((value) => value + 1);
-                } else setFallbackId(currentTrack);
+                } else if (!serverManaged) setFallbackId(currentTrack);
+                else setAudioError('Аудиопоток прервался на этом устройстве. Повторите загрузку.');
               }
               else {
                 if (currentItem) preparedAudio.current.delete(audioCacheKey(currentItem));
@@ -2501,6 +2542,8 @@ export default function App() {
             {fallbackId === currentTrack && <p className="muted small">Аудиопоток YouTube недоступен — пробуем встроенный плеер.</p>}
             {fallbackId === currentTrack && session.role === 'Main' && <button className="button tiny" onClick={() => { if (typeof ytPlayer.current?.playVideo === 'function') ytPlayer.current.playVideo(); }}>Запустить YouTube</button>}
             {session.role === 'Member' && !remotePlayback && <p className="muted small">Ждём позицию воспроизведения от хоста…</p>}
+            {serverManaged && <p className="muted small">Очередь воспроизводится по серверному времени. Пауза этого устройства не останавливает остальных.</p>}
+            {serverPlaybackError && <p className="notice" role="status">{serverPlaybackError}</p>}
             {audioError && <p className="notice" role="alert">{audioError}</p>}
             {isYandex && audioError && currentItem?.owner_id !== ownerId && <p className="muted small">
               Доступ к этому треку предоставляет {profileLabel(profiles[currentItem.owner_id])}. Если доступ истёк, попросите автора подключить Яндекс Музыку заново.</p>}

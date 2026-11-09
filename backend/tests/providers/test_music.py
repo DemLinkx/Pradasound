@@ -492,7 +492,12 @@ def test_vk_public_authorization_url_and_direct_audio(client, monkeypatch, token
     monkeypatch.setattr(music, "_queue_item", lambda *args: ("vk", handle, "1_2"))
     stream = client.get("/api/music/queue/room/item/stream")
     assert stream.status_code == 200
-    assert stream.json() == {"url": "https://cs1.vkuseraudio.net/full.mp3", "format": "audio"}
+    assert stream.json()["format"] == "audio"
+    assert stream.json()["url"].startswith("/api/music/hls/")
+    assert stream.json()["url"].endswith("/audio.bin")
+    ticket_id = stream.json()["url"].split("/")[-2]
+    assert music.TICKETS[ticket_id].source == "https://cs1.vkuseraudio.net/full.mp3"
+    assert "x" * 30 not in str(stream.json())
     assert [path for path, _, _ in calls] == [
         "/method/audio.get",
         "/method/audio.get",

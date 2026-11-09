@@ -33,6 +33,11 @@ services:
       TELEGRAM_POLLING_ENABLED: ${TELEGRAM_POLLING_ENABLED:-false}
       RELAY_TURN_URLS: ${RELAY_TURN_URLS:-[]}
       RELAY_TURN_SECRET: ${RELAY_TURN_SECRET:-}
+      SERVER_PLAYBACK_ENABLED: ${SERVER_PLAYBACK_ENABLED:-false}
+      ROOM_STATE_FILE: ${ROOM_STATE_FILE:-}
+      ROOM_STATE_KEY: ${ROOM_STATE_KEY:-}
+    volumes:
+      - room_state:/app/state
     restart: unless-stopped
     init: true
     read_only: true
@@ -131,5 +136,6 @@ services:
         max-file: "3"
 
 volumes:
+  room_state:
   caddy_data:
   caddy_config:
