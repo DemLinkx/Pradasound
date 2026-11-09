@@ -812,7 +812,7 @@ async def room_host_stream(lobby_id: str, item_id: str, x_host_token: str = Head
     if not lobby or not secrets.compare_digest(x_host_token, lobby.host_token):
         raise HTTPException(403, "Доступно только хосту комнаты")
     result = await room_stream_descriptor(lobby_id, item_id)
-    if not secrets.compare_digest(x_host_token, lobby.host_token):
+    if LOBBIES.get(lobby_id) is not lobby or not secrets.compare_digest(x_host_token, lobby.host_token):
         raise HTTPException(403, "Права хоста изменились")
     return result
 

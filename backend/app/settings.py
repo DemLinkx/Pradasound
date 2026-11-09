@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from pydantic import SecretStr
+from pydantic import SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 MAX_TRACK_SECONDS = 12 * 60
@@ -42,3 +42,9 @@ class Settings(BaseSettings):
     server_playback_enabled: bool = False
     room_state_file: Path | None = None
     room_state_key: SecretStr = SecretStr("")
+
+
+    @field_validator("room_state_file", mode="before")
+    @classmethod
+    def empty_room_state_path(cls, value):
+        return None if value == "" else value

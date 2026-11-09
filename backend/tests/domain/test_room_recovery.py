@@ -77,3 +77,10 @@ def test_repeated_stale_disconnect_cannot_pause_or_expire_a_room(monkeypatch):
     before = room.last_empty
     rooms.manager.disconnect('room', 'old-connection')
     assert room.connections and room.last_empty == before and not room.vacated
+
+
+def test_blank_docker_recovery_settings_disable_persistence(monkeypatch):
+    from app.settings import Settings
+    monkeypatch.setenv('ROOM_STATE_FILE', '')
+    monkeypatch.setenv('ROOM_STATE_KEY', '')
+    assert Settings().room_state_file is None

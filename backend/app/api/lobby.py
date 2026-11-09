@@ -432,7 +432,7 @@ async def prepare_room_clock(lid: str, room: Lobby, item: QueueItem, revision: i
             raise HTTPException(422, "Трек длиннее 12 минут")
         item.duration_ms = int(duration * 1000)
         room.playback_error = ""
-        set_room_clock(room, room.server_offset, duration, False)
+        set_room_clock(room, min(room.server_offset, max(0, duration - 1)), duration, not bool(room.connections))
         room.server_offset = 0
         await manager.broadcast(lid)
     except Exception:
@@ -975,6 +975,7 @@ async def lobby_ws(ws: WebSocket, lobby_id: str) -> None:
                     continue
                 lobby.owner_ids.pop(old_token, None)
                 reset_relay(lobby)
+                mark_rooms_dirty()
                 await manager.send(ws, {"type": "host_revoked"})
                 await manager.broadcast(lobby_id)
                 continue
