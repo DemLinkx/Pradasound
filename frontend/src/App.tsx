@@ -1298,6 +1298,9 @@ export default function App() {
     }
     const buffered = preloaded.current;
     if ((session?.role === 'Member' || serverManaged) && playbackDevice && buffered && buffered.id === currentItem?.id && slotKeys.current[buffered.slot] === currentKey) {
+      fading.current = false;
+      if (fadeFrame.current !== null) cancelAnimationFrame(fadeFrame.current);
+      fadeFrame.current = null;
       preloaded.current = null;
       activeAudioRef.current = buffered.slot;
       setActiveAudio(buffered.slot);
@@ -1307,7 +1310,7 @@ export default function App() {
       clearAudio(1 - buffered.slot);
       slotKeys.current[1 - buffered.slot] = '';
       const player = audioPlayers[buffered.slot].current;
-      if (player) { player.volume = volumeRef.current; syncPlaybackTime(player); }
+      if (player) { player.volume = volumeRef.current; syncPlaybackTime(player); setPlayingKey(player.paused ? '' : currentKey); }
       return;
     }
     promoting.current = null;
@@ -2168,10 +2171,10 @@ export default function App() {
     next.currentTime = 0;
     next.volume = 0;
     void next.play().then(() => {
-      if (!fading.current) return;
+      if (!fading.current || slotKeys.current[slot] !== currentKey || preloaded.current?.id !== ready.id) return;
       const started = performance.now();
       const tick = (now: number) => {
-        if (!fading.current) return;
+        if (!fading.current || slotKeys.current[slot] !== currentKey || preloaded.current?.id !== ready.id) return;
         const elapsed = (now - started) / 1000;
         const [outgoing, incoming] = crossfadeVolumes(elapsed, volumeRef.current);
         old.volume = outgoing; next.volume = incoming;
@@ -2179,7 +2182,7 @@ export default function App() {
         else fadeFrame.current = requestAnimationFrame(tick);
       };
       fadeFrame.current = requestAnimationFrame(tick);
-    }).catch(() => { fading.current = false; old.volume = volumeRef.current; next.pause(); });
+    }).catch(() => { if (slotKeys.current[slot] === currentKey) { fading.current = false; old.volume = volumeRef.current; next.pause(); } });
   }
 
   const statusLabel = { connecting: 'Подключение…', authenticating: 'Вход…', connected: 'Подключено', closed: 'Отключено' }[status];

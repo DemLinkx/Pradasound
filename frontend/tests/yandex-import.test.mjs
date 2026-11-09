@@ -299,3 +299,31 @@ test('crossfade handles a frame timestamp before play completion without negativ
     assert.ok(gain(elapsed, 1.5).every((volume) => volume >= 0 && volume <= 1));
   }
 });
+
+test('an obsolete fade frame or play rejection cannot change promoted audio', async () => {
+  const old = { paused: false, duration: 20, currentTime: 18, volume: .8 };
+  let rejectPlay;
+  const next = { readyState: 4, volume: .8, currentTime: 0, pauses: 0,
+    pause() { this.pauses++; }, play() { return new Promise((_, reject) => { rejectPlay = reject; }); } };
+  let frame;
+  const context = { session: { role: 'Main' }, serverManaged: true,
+    activeAudioRef: { current: 0 }, slotKeys: { current: ['current', 'next'] }, currentKey: 'current',
+    fading: { current: false }, skipSent: { current: '' }, audioPlayers: [{ current: old }, { current: next }],
+    preloaded: { current: { key: 'current', id: 'next-id', slot: 1 } }, nextItem: { id: 'next-id' },
+    HTMLMediaElement: { HAVE_CURRENT_DATA: 2 }, playbackLength, trackDurations: {}, currentTrack: 'track',
+    currentItem: { duration_ms: 20000 }, volumeRef: { current: .8 }, performance: { now: () => 1000 },
+    requestAnimationFrame: (fn) => { frame = fn; return 1; }, fadeFrame: { current: null }, crossfadeVolumes: sourceFunction('crossfadeVolumes'),
+    finishFade: () => { throw Error('obsolete fade advanced the queue'); } };
+  const start = source.indexOf('function maybeCrossfade('), end = source.indexOf('\n  }\n', start) + 5;
+  const fade = new Script(`${stripTypeScriptTypes(source.slice(start, end))}; maybeCrossfade`).runInNewContext(context);
+  fade(0); assert.equal(next.pauses, 1);
+  context.slotKeys.current[0] = 'new-track';
+  rejectPlay(Error('play aborted during queue transition'));
+  await Promise.resolve(); await Promise.resolve();
+  assert.equal(next.pauses, 1); assert.equal(context.fading.current, true);
+  next.play = () => Promise.resolve(); context.slotKeys.current[0] = 'current'; context.fading.current = false;
+  fade(0); await Promise.resolve(); assert.equal(typeof frame, 'function');
+  context.slotKeys.current[0] = 'another-track';
+  const volumes = [old.volume, next.volume]; frame(2000);
+  assert.deepEqual([old.volume, next.volume], volumes);
+});
