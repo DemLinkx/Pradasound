@@ -1544,14 +1544,16 @@ export default function App() {
   }, [fallbackId, currentTrack, session?.role, playbackDevice]);
 
   useEffect(() => {
-    if (session?.role !== 'Member' || status !== 'connected' || socket.current?.readyState !== WebSocket.OPEN) return;
+    if (status !== 'connected' || socket.current?.readyState !== WebSocket.OPEN) return;
     const ws = socket.current;
-    ws.send(JSON.stringify({ action: 'listen_together', enabled: listenTogether }));
-    if (!listenTogether) { setListenerToken(''); return; }
+    if (session?.role === 'Member') {
+      ws.send(JSON.stringify({ action: 'listen_together', enabled: listenTogether }));
+      if (!listenTogether) { setListenerToken(''); return; }
+    } else if (!serverManaged) return;
     const ping = () => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ action: 'playback_ping', client_time: Date.now() })); };
     ping(); const timer = setInterval(ping, 15000);
     return () => clearInterval(timer);
-  }, [listenTogether, status, session?.role, session?.lobby_id]);
+  }, [listenTogether, status, session?.role, session?.lobby_id, serverManaged]);
 
   function localPlayback() {
     if (relayReceiving) {
